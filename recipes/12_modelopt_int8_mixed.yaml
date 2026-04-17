@@ -1,0 +1,41 @@
+name: modelopt_int8_mixed
+model:
+  family: yolo26
+  variant: n
+  weights: yolo26n.pt
+  ultralytics_version: null
+runtime:
+  engine: tensorrt
+  version: null
+  dtype: int8
+technique:
+  name: int8_ptq_mixed
+  source: modelopt
+  calibrator: entropy          # best PTQ calibrator from Phase 2 (recipe #9)
+  calibration_samples: 512
+  calibration_dataset: coco_val2017
+  calibration_seed: 42
+  # P-L3: start narrow (4 layers). cv3.* (classification) intentionally
+  # excluded from the exclude list — softmax is robust to INT8 quant error.
+  # Add cv3.* only if this config misses the 1%p mAP drop target.
+  nodes_to_exclude:
+    - /model.0/conv/Conv          # stem — activation distribution ≠ middle layers
+    - /model.23/cv2.0/Conv        # bbox regression stride 8 (pixel-critical)
+    - /model.23/cv2.1/Conv        # bbox regression stride 16
+    - /model.23/cv2.2/Conv        # bbox regression stride 32
+hardware:
+  gpu: null
+  cuda: null
+  driver: null
+measurement:
+  dataset: coco_val2017
+  num_images: 500
+  warmup_iters: 100
+  measure_iters: 100
+  batch_sizes: [1, 8]
+  input_size: 640
+  gpu_clock_lock: true
+  seed: 42
+constraints:
+  max_map_drop_pct: 1.0
+  min_fps_bs1: 30
