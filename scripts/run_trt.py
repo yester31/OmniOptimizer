@@ -53,19 +53,33 @@ def _seed_all(seed: int) -> None:
         pass
 
 
-def _export_onnx(weights: str, imgsz: int, half: bool, cache_dir: Path,
-                 dynamic: bool = True) -> Path:
+def _export_onnx(weights, imgsz: int, half: bool, cache_dir: Path,
+                 dynamic: bool = True, tag_suffix: str = "") -> Path:
     """Export YOLO weights to ONNX, defaulting to dynamic batch so a single
-    ONNX can drive both bs=1 and bs>1 engines."""
-    from ultralytics import YOLO
+    ONNX can drive both bs=1 and bs>1 engines.
 
+    ``weights`` accepts either a filesystem path (str/Path) to an ultralytics
+    checkpoint, or a live ``ultralytics.YOLO`` instance (used by the modelopt
+    2:4 sparsify path, which returns an in-memory YOLO whose backbone
+    weights already carry the pruning pattern — re-saving and re-loading
+    would drop ultralytics metadata).
+    """
     cache_dir.mkdir(parents=True, exist_ok=True)
     bs_tag = "dyn" if dynamic else "bs1"
-    tag = f"{Path(weights).stem}_{imgsz}_{'fp16' if half else 'fp32'}_{bs_tag}.onnx"
+    is_path = isinstance(weights, (str, Path))
+    if is_path:
+        stem = Path(weights).stem
+    else:
+        stem = Path(getattr(weights, "ckpt_path", "yolo") or "yolo").stem
+    tag = f"{stem}_{imgsz}_{'fp16' if half else 'fp32'}{tag_suffix}_{bs_tag}.onnx"
     cached = cache_dir / tag
     if cached.exists():
         return cached
-    model = YOLO(weights)
+    if is_path:
+        from ultralytics import YOLO
+        model = YOLO(weights)
+    else:
+        model = weights  # already a YOLO-like wrapper with .export(...)
     onnx_path = model.export(
         format="onnx", imgsz=imgsz, half=False, simplify=True, dynamic=dynamic,
     )
@@ -73,6 +87,50 @@ def _export_onnx(weights: str, imgsz: int, half: bool, cache_dir: Path,
     if src != cached:
         src.rename(cached)
     return cached
+
+
+def _apply_modelopt_sparsify(weights: str, imgsz: int):
+    """Return a ultralytics YOLO whose backbone weights carry the 2:4 pattern.
+
+    Loads a fresh YOLO (preserves ultralytics metadata), runs modelopt 2:4
+    magnitude pruning on ``yolo.model``, exports the sparsified module to
+    strip modelopt wrappers, then swaps the weights back into the YOLO
+    wrapper via ``load_state_dict``. Downstream ONNX export path stays
+    identical to the non-sparse case — same ``YOLO.export(...)`` entry
+    point.
+
+    Fallback: if this torch-level path proves brittle against future
+    ultralytics/modelopt versions, Plan B is ONNX graph-level weight
+    masking via onnx-graphsurgeon (zero out the right lanes per 4-column
+    block). Not implemented now; add only if measured necessary.
+    """
+    try:
+        from modelopt.torch.sparsity import sparsify as mts_sparsify
+        from modelopt.torch.sparsity import export as mts_export
+    except ImportError as e:
+        raise RuntimeError(
+            "nvidia-modelopt torch extension not installed. Install with: "
+            "pip install --extra-index-url https://pypi.nvidia.com nvidia-modelopt"
+        ) from e
+
+    import torch
+    from ultralytics import YOLO
+
+    yolo = YOLO(weights)
+    inner = yolo.model
+    device = next(inner.parameters()).device
+    dummy = torch.randn(1, 3, imgsz, imgsz, device=device)
+
+    def _loader():
+        yield dummy
+
+    config = {"data_loader": _loader(), "collect_func": lambda x: x}
+    sparse_model = mts_sparsify(inner, mode="sparse_magnitude", config=config)
+    sparse_model = mts_export(sparse_model)
+
+    yolo.model.load_state_dict(sparse_model.state_dict())
+    print("[info] modelopt 2:4 sparse_magnitude applied + exported", file=sys.stderr)
+    return yolo
 
 
 def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
@@ -83,6 +141,12 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     This path preserves ultralytics' inference-head wiring (NMS-ready output
     tensor), unlike direct torch-level quantize + torch.onnx.export which
     bypasses the wrapper and breaks validator post-processing.
+
+    When ``technique.sparsity_preprocess == '2:4'``, we first pre-prune the
+    weights via modelopt.torch.sparsity so the resulting QDQ-ONNX carries
+    zeros in the 2:4 pattern; TensorRT's SPARSE_WEIGHTS flag then actually
+    selects sparse INT8 kernels. When ``technique.nodes_to_exclude`` is set,
+    those ONNX node names stay at FP16 inside the QDQ graph.
     """
     try:
         from modelopt.onnx.quantization import quantize as moq_quantize
@@ -94,26 +158,31 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     calibrator = recipe.technique.calibrator or "max"  # max | entropy | percentile
+    sparsity_tag = "_sparse24" if recipe.technique.sparsity_preprocess == "2:4" else ""
     bs_tag = "dyn" if dynamic else "bs1"
-    tag = f"{Path(recipe.model.weights).stem}_{imgsz}_modelopt_{calibrator}_{bs_tag}.onnx"
+    tag = (
+        f"{Path(recipe.model.weights).stem}_{imgsz}_modelopt_"
+        f"{calibrator}{sparsity_tag}_{bs_tag}.onnx"
+    )
     cached = cache_dir / tag
     if cached.exists():
         return cached
 
-    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
-                              cache_dir=cache_dir, dynamic=dynamic)
+    if recipe.technique.sparsity_preprocess == "2:4":
+        yolo = _apply_modelopt_sparsify(recipe.model.weights, imgsz)
+        clean_onnx = _export_onnx(yolo, imgsz, half=False,
+                                  cache_dir=cache_dir, dynamic=dynamic,
+                                  tag_suffix="_sparse24")
+    else:
+        clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
+                                  cache_dir=cache_dir, dynamic=dynamic)
 
     samples = recipe.technique.calibration_samples or 512
     seed = recipe.technique.calibration_seed or 42
     val_yaml = os.environ.get("OMNI_COCO_YAML")
     calib_data = _build_calib_numpy(val_yaml, samples, imgsz, seed)
 
-    print(
-        f"[info] modelopt.onnx.quantize: method={calibrator}, "
-        f"samples={calib_data.shape[0]}, onnx={clean_onnx.name}",
-        file=sys.stderr,
-    )
-    moq_quantize(
+    quant_kwargs = dict(
         onnx_path=str(clean_onnx),
         quantize_mode="int8",
         calibration_method=calibrator,
@@ -121,6 +190,18 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         output_path=str(cached),
         log_level="WARNING",
     )
+    if recipe.technique.nodes_to_exclude:
+        quant_kwargs["nodes_to_exclude"] = list(recipe.technique.nodes_to_exclude)
+
+    print(
+        f"[info] modelopt.onnx.quantize: method={calibrator}, "
+        f"samples={calib_data.shape[0]}, "
+        f"sparsity={sparsity_tag or 'none'}, "
+        f"excludes={len(recipe.technique.nodes_to_exclude or [])}, "
+        f"onnx={clean_onnx.name}",
+        file=sys.stderr,
+    )
+    moq_quantize(**quant_kwargs)
     print(f"[info] modelopt wrote QDQ onnx: {cached}", file=sys.stderr)
     return cached
 
