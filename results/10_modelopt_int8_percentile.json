@@ -1,0 +1,36 @@
+{
+  "recipe": "modelopt_int8_percentile",
+  "started_at": "2026-04-17T13:21:03.530924+00:00",
+  "finished_at": "2026-04-17T13:29:16.244290+00:00",
+  "env": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu_compute_capability": "8.6",
+    "cuda": "12.4",
+    "cudnn": "90100",
+    "driver": "576.80",
+    "tensorrt": "10.16.1.11",
+    "os": "Linux 5.15.167.4-microsoft-standard-WSL2",
+    "python": "3.10.12",
+    "torch": "2.6.0+cu124",
+    "onnxruntime": "1.22.0",
+    "ultralytics": "8.4.27"
+  },
+  "model_size_mb": null,
+  "latency_ms": {
+    "p50": 2.1726600001557017,
+    "p95": 4.427596599964545,
+    "p99": 5.0415143500276836
+  },
+  "throughput_fps": {
+    "bs1": 460.26529688415854,
+    "bs8": null
+  },
+  "peak_gpu_mem_mb": 4.69482421875,
+  "cold_start_ms": 125.66691900019578,
+  "accuracy": {
+    "map_50": 0.5217797358024568,
+    "map_50_95": 0.3650798270562782
+  },
+  "meets_constraints": true,
+  "notes": "bs=8: build failed (engine build returned None)"
+}

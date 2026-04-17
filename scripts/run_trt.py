@@ -1,0 +1,610 @@
+"""Runner for native TensorRT recipes (#5 FP16, #6 INT8 PTQ, #7 INT8 + 2:4 Sparsity).
+
+Pipeline:
+1. Export ultralytics weights to ONNX (cached).
+2. Build a TensorRT engine with the requested dtype / sparsity flags. INT8
+   recipes run an entropy calibrator over ``calibration_samples`` random
+   images from COCO val (seeded).
+3. Deserialize the engine and measure latency via ``execute_async_v3``.
+4. Accuracy falls back to ultralytics' engine-aware val path.
+
+This file is the most intricate of the three runners. Where we hit edge cases
+(e.g. TensorRT build errors, sparsity unsupported on non-Ampere hardware) we
+record the problem in ``notes`` rather than crashing the whole ``make all``.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts._schemas import (  # noqa: E402
+    AccuracyStats,
+    LatencyStats,
+    Recipe,
+    Result,
+    ThroughputStats,
+    load_recipe,
+)
+from scripts.env_lock import collect_env, lock_gpu_clock  # noqa: E402
+from scripts.measure import (  # noqa: E402
+    measure_cold_start,
+    measure_latency,
+    throughput_from_latency,
+)
+
+
+def _seed_all(seed: int) -> None:
+    random.seed(seed)
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except Exception:
+        pass
+
+
+def _export_onnx(weights: str, imgsz: int, half: bool, cache_dir: Path) -> Path:
+    from ultralytics import YOLO
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tag = f"{Path(weights).stem}_{imgsz}_{'fp16' if half else 'fp32'}.onnx"
+    cached = cache_dir / tag
+    if cached.exists():
+        return cached
+    model = YOLO(weights)
+    onnx_path = model.export(format="onnx", imgsz=imgsz, half=False, simplify=True, dynamic=False)
+    src = Path(onnx_path)
+    if src != cached:
+        src.rename(cached)
+    return cached
+
+
+def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path) -> Path:
+    """Quantize via modelopt.onnx — takes ultralytics' clean ONNX export and
+    injects QDQ nodes using COCO calibration images.
+
+    This path preserves ultralytics' inference-head wiring (NMS-ready output
+    tensor), unlike direct torch-level quantize + torch.onnx.export which
+    bypasses the wrapper and breaks validator post-processing.
+    """
+    try:
+        from modelopt.onnx.quantization import quantize as moq_quantize
+    except ImportError as e:
+        raise RuntimeError(
+            "nvidia-modelopt not installed. Install with: "
+            "pip install --extra-index-url https://pypi.nvidia.com nvidia-modelopt"
+        ) from e
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    calibrator = recipe.technique.calibrator or "max"  # max | entropy | percentile
+    tag = f"{Path(recipe.model.weights).stem}_{imgsz}_modelopt_{calibrator}.onnx"
+    cached = cache_dir / tag
+    if cached.exists():
+        return cached
+
+    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False, cache_dir=cache_dir)
+
+    samples = recipe.technique.calibration_samples or 512
+    seed = recipe.technique.calibration_seed or 42
+    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    calib_data = _build_calib_numpy(val_yaml, samples, imgsz, seed)
+
+    print(
+        f"[info] modelopt.onnx.quantize: method={calibrator}, "
+        f"samples={calib_data.shape[0]}, onnx={clean_onnx.name}",
+        file=sys.stderr,
+    )
+    moq_quantize(
+        onnx_path=str(clean_onnx),
+        quantize_mode="int8",
+        calibration_method=calibrator,
+        calibration_data=calib_data,
+        output_path=str(cached),
+        log_level="WARNING",
+    )
+    print(f"[info] modelopt wrote QDQ onnx: {cached}", file=sys.stderr)
+    return cached
+
+
+def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed: int):
+    """Return (N,3,H,W) float32 numpy array for modelopt.onnx calibration.
+    Falls back to random-normal when no COCO yaml is mounted."""
+    import numpy as np
+
+    if val_yaml and Path(val_yaml).exists():
+        import cv2
+
+        paths = _resolve_val_image_paths(Path(val_yaml))
+        rng = random.Random(seed)
+        rng.shuffle(paths)
+        paths = paths[:n_samples]
+        buf = []
+        for p in paths:
+            img = cv2.imread(str(p))
+            if img is None:
+                continue
+            buf.append(_letterbox(img, imgsz))  # (3,H,W) float32 [0,1]
+        if buf:
+            return np.stack(buf, axis=0).astype(np.float32)
+
+    rng_np = np.random.default_rng(seed)
+    return rng_np.standard_normal((n_samples, 3, imgsz, imgsz), dtype=np.float32)
+
+
+def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path) -> tuple[Path, bool]:
+    """Dispatch to the right ONNX preparation path based on technique.source.
+
+    Returns (onnx_path, quant_preapplied). When quant_preapplied is True the
+    ONNX carries QDQ nodes and `_build_engine` must skip its INT8 flag +
+    calibrator logic.
+    """
+    source = recipe.technique.source
+    if source == "trt_builtin":
+        return _export_onnx(recipe.model.weights, imgsz, half=False, cache_dir=cache_dir), False
+    if source == "modelopt":
+        return _prepare_modelopt_onnx(recipe, imgsz, cache_dir), True
+    if source == "ort_quant":
+        raise NotImplementedError(
+            "technique.source='ort_quant' is not in the OmniOptimizer roadmap yet."
+        )
+    raise ValueError(f"unknown technique.source: {source!r}")
+
+
+def _letterbox(img, imgsz: int):
+    """Classic YOLO letterbox: resize keeping aspect ratio, pad to imgsz×imgsz
+    with value 114. Returns CHW float32 in [0, 1], RGB channel order."""
+    import cv2
+    import numpy as np
+
+    h, w = img.shape[:2]
+    r = imgsz / max(h, w)
+    new_h, new_w = int(round(h * r)), int(round(w * r))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.full((imgsz, imgsz, 3), 114, dtype=np.uint8)
+    top = (imgsz - new_h) // 2
+    left = (imgsz - new_w) // 2
+    canvas[top:top + new_h, left:left + new_w] = resized
+    rgb_chw = canvas[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
+    return np.ascontiguousarray(rgb_chw)
+
+
+def _resolve_val_image_paths(yaml_path: str) -> list[str]:
+    """Parse a ultralytics-style dataset yaml and return absolute val image
+    paths. Keeps the resolution logic in one place so callers don't re-implement
+    the ``path`` + ``val`` relative-path dance."""
+    import yaml as yaml_mod
+
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        spec = yaml_mod.safe_load(f)
+    root = Path(spec["path"])
+    val_rel = spec["val"]
+    val_txt = (root / val_rel) if not Path(val_rel).is_absolute() else Path(val_rel)
+
+    with open(val_txt, "r", encoding="utf-8") as f:
+        lines = [ln.strip() for ln in f if ln.strip()]
+
+    paths: list[str] = []
+    for ln in lines:
+        p = Path(ln)
+        if not p.is_absolute():
+            p = (root / ln).resolve()
+        paths.append(str(p))
+    return paths
+
+
+def _make_coco_calibrator(shape, n_samples: int, cache_path: Path, seed: int,
+                          val_yaml_path: str):
+    """INT8 entropy calibrator backed by real COCO val images.
+
+    Far more accurate than the random-normal stand-in because the entropy
+    calibrator derives per-tensor scales from activation *distributions* — and
+    real imagery produces distributions that match the deployment regime.
+    Expect the random fallback to drop mAP double-digit %p; this one should
+    bring the drop into the sub-1%p range for reasonable PTQ settings.
+    """
+    import numpy as np
+    import tensorrt as trt
+    import torch
+
+    all_paths = _resolve_val_image_paths(val_yaml_path)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(all_paths)
+    img_paths = all_paths[:n_samples]
+    imgsz = shape[2]
+    bs = shape[0]
+
+    class _CocoCal(trt.IInt8EntropyCalibrator2):
+        def __init__(self):
+            trt.IInt8EntropyCalibrator2.__init__(self)
+            self._buf = torch.empty(shape, device="cuda", dtype=torch.float32)
+            self._idx = 0
+
+        def get_batch_size(self):
+            return bs
+
+        def get_batch(self, names):  # noqa: ARG002
+            import cv2
+
+            if self._idx >= len(img_paths):
+                return None
+            batch = []
+            for k in range(bs):
+                j = self._idx + k
+                if j >= len(img_paths):
+                    batch.append(batch[-1])
+                    continue
+                img = cv2.imread(img_paths[j])
+                if img is None:
+                    batch.append(np.zeros((3, imgsz, imgsz), dtype=np.float32))
+                else:
+                    batch.append(_letterbox(img, imgsz))
+            host = np.stack(batch, axis=0)
+            self._buf.copy_(torch.from_numpy(host))
+            self._idx += bs
+            return [int(self._buf.data_ptr())]
+
+        def read_calibration_cache(self):
+            if cache_path.exists():
+                return cache_path.read_bytes()
+            return None
+
+        def write_calibration_cache(self, cache):
+            cache_path.write_bytes(cache)
+
+    return _CocoCal()
+
+
+def _make_random_calibrator(shape, n_samples: int, cache_path: Path, seed: int):
+    """Random-normal INT8 calibrator. Used as fallback when no dataset yaml is
+    available. Known to produce large mAP drops — see ``_make_coco_calibrator``
+    for the real path.
+    """
+    import numpy as np
+    import tensorrt as trt
+    import torch
+
+    class _TorchCalibrator(trt.IInt8EntropyCalibrator2):
+        def __init__(self):
+            trt.IInt8EntropyCalibrator2.__init__(self)
+            rng = np.random.default_rng(seed)
+            host = rng.standard_normal(tuple(shape), dtype=np.float32)
+            # Keep the tensor alive on self so its device pointer stays valid
+            # for the whole calibration loop.
+            self._t = torch.from_numpy(host).to("cuda")
+            self._i = 0
+
+        def get_batch_size(self):
+            return shape[0]
+
+        def get_batch(self, names):  # noqa: ARG002
+            if self._i >= n_samples:
+                return None
+            self._i += 1
+            return [int(self._t.data_ptr())]
+
+        def read_calibration_cache(self):
+            if cache_path.exists():
+                return cache_path.read_bytes()
+            return None
+
+        def write_calibration_cache(self, cache):
+            cache_path.write_bytes(cache)
+
+    return _TorchCalibrator()
+
+
+def _build_engine(
+    onnx_path: Path,
+    engine_path: Path,
+    dtype: str,
+    sparsity: Optional[str],
+    batch_size: int,
+    imgsz: int,
+    calib_samples: int,
+    calib_seed: int,
+    quant_preapplied: bool = False,
+) -> tuple[Optional[Path], Optional[str]]:
+    """Build a TensorRT engine. Returns (engine_path, note-or-None)."""
+    try:
+        import tensorrt as trt  # noqa: F401
+    except Exception as e:
+        return None, f"tensorrt import failed: {e}"
+
+    import tensorrt as trt
+
+    if engine_path.exists():
+        return engine_path, None
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(flag)
+    parser = trt.OnnxParser(network, logger)
+
+    with open(onnx_path, "rb") as f:
+        if not parser.parse(f.read()):
+            errs = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
+            return None, f"onnx parse failed:\n{errs}"
+
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+
+    if dtype == "fp16":
+        config.set_flag(trt.BuilderFlag.FP16)
+    elif dtype == "int8":
+        if not builder.platform_has_fast_int8:
+            return None, "platform does not support fast INT8"
+        config.set_flag(trt.BuilderFlag.INT8)
+        if quant_preapplied:
+            # QDQ nodes carry the scales; no calibrator needed. INT8 flag is
+            # still required so TRT selects INT8 tactics. modelopt's default
+            # high_precision_dtype=fp16 marks residual layers as fp16, so we
+            # also enable FP16 — mixed INT8/FP16 is what modelopt targets.
+            config.set_flag(trt.BuilderFlag.FP16)
+            print("[info] INT8+FP16: QDQ-preapplied ONNX (no calibrator)", file=sys.stderr)
+        else:
+            cache_file = engine_path.with_suffix(".calib")
+            val_yaml = os.environ.get("OMNI_COCO_YAML")
+            calibrator = None
+            if val_yaml and Path(val_yaml).exists():
+                try:
+                    calibrator = _make_coco_calibrator(
+                        shape=(1, 3, imgsz, imgsz),
+                        n_samples=calib_samples,
+                        cache_path=cache_file,
+                        seed=calib_seed,
+                        val_yaml_path=val_yaml,
+                    )
+                    print(f"[info] INT8 calib: coco images from {val_yaml}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[warn] coco calibrator failed ({e}); falling back to random", file=sys.stderr)
+            if calibrator is None:
+                calibrator = _make_random_calibrator(
+                    shape=(1, 3, imgsz, imgsz),
+                    n_samples=calib_samples,
+                    cache_path=cache_file,
+                    seed=calib_seed,
+                )
+                print("[info] INT8 calib: random-normal fallback", file=sys.stderr)
+            config.int8_calibrator = calibrator
+
+    if sparsity == "2:4":
+        try:
+            config.set_flag(trt.BuilderFlag.SPARSE_WEIGHTS)
+        except AttributeError:
+            return None, "TensorRT build lacks SPARSE_WEIGHTS flag"
+
+    # Fixed shape profile so latency is deterministic.
+    profile = builder.create_optimization_profile()
+    name = network.get_input(0).name
+    shape = (batch_size, 3, imgsz, imgsz)
+    profile.set_shape(name, shape, shape, shape)
+    config.add_optimization_profile(profile)
+
+    serialized = builder.build_serialized_network(network, config)
+    if serialized is None:
+        return None, "engine build returned None"
+
+    engine_path.parent.mkdir(parents=True, exist_ok=True)
+    engine_path.write_bytes(bytes(serialized))
+    return engine_path, None
+
+
+def _make_trt_forward(engine_path: Path, batch_size: int, imgsz: int):  # pragma: no cover
+    """Build a TRT forward callable backed entirely by torch.cuda memory.
+
+    No pycuda: we share torch's CUDA context, which coexists cleanly with the
+    ultralytics+torch ONNX export path earlier in the pipeline. All I/O tensors
+    live on the returned closure as attributes so they are kept alive for the
+    duration of the benchmarking loop.
+    """
+    import tensorrt as trt
+    import torch
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(engine_path.read_bytes())
+    context = engine.create_execution_context()
+
+    input_name = engine.get_tensor_name(0)
+    input_shape = (batch_size, 3, imgsz, imgsz)
+    context.set_input_shape(input_name, input_shape)
+
+    trt_to_torch = {
+        trt.float32: torch.float32,
+        trt.float16: torch.float16,
+        trt.int8: torch.int8,
+        trt.int32: torch.int32,
+        trt.int64: torch.int64,
+        trt.bool: torch.bool,
+    }
+
+    device = torch.device("cuda")
+    io_tensors: list = []  # hold refs to prevent GC freeing device memory
+    for i in range(engine.num_io_tensors):
+        name = engine.get_tensor_name(i)
+        dtype_torch = trt_to_torch.get(engine.get_tensor_dtype(name), torch.float32)
+        if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+            t = torch.randn(input_shape, device=device, dtype=torch.float32).to(dtype_torch)
+        else:
+            out_shape = tuple(context.get_tensor_shape(name))
+            t = torch.empty(out_shape, device=device, dtype=dtype_torch)
+        io_tensors.append(t)
+        context.set_tensor_address(name, int(t.data_ptr()))
+
+    stream = torch.cuda.Stream()
+
+    def fwd():
+        with torch.cuda.stream(stream):
+            context.execute_async_v3(stream.cuda_stream)
+        stream.synchronize()
+
+    # Pin long-lived references so Python doesn't free them between calls.
+    fwd._io = io_tensors  # type: ignore[attr-defined]
+    fwd._context = context  # type: ignore[attr-defined]
+    fwd._stream = stream  # type: ignore[attr-defined]
+    return fwd, engine
+
+
+def run(recipe_path: str, out_path: str) -> int:
+    recipe: Recipe = load_recipe(recipe_path)
+    _seed_all(recipe.measurement.seed)
+
+    env = collect_env()
+    clock_note = lock_gpu_clock(recipe.measurement.gpu_clock_lock)
+    if clock_note:
+        env["clock_lock_note"] = clock_note
+
+    imgsz = recipe.measurement.input_size
+    onnx_cache = Path("results/_onnx")
+    engine_cache = Path("results/_engines")
+    engine_cache.mkdir(parents=True, exist_ok=True)
+
+    onnx_path, quant_preapplied = _prepare_onnx(recipe, imgsz, onnx_cache)
+    dtype = recipe.runtime.dtype
+    sparsity = recipe.runtime.sparsity
+
+    started = datetime.now(timezone.utc).isoformat()
+    note_parts: list[str] = []
+
+    per_bs: dict[int, dict] = {}
+    cold_start_ms: Optional[float] = None
+
+    source = recipe.technique.source
+    source_suffix = "" if source == "trt_builtin" else f"_{source}"
+    for bs in recipe.measurement.batch_sizes:
+        engine_tag = f"{onnx_path.stem}_{dtype}{'_sparse' if sparsity else ''}{source_suffix}_bs{bs}.engine"
+        engine_path = engine_cache / engine_tag
+
+        built, err = _build_engine(
+            onnx_path=onnx_path,
+            engine_path=engine_path,
+            dtype=dtype,
+            sparsity=sparsity,
+            batch_size=bs,
+            imgsz=imgsz,
+            calib_samples=recipe.technique.calibration_samples or 0,
+            calib_seed=recipe.technique.calibration_seed or recipe.measurement.seed,
+            quant_preapplied=quant_preapplied,
+        )
+        if built is None:
+            note_parts.append(f"bs={bs}: build failed ({err})")
+            continue
+
+        try:
+            def _load(e=built, b=bs):
+                return _make_trt_forward(e, b, imgsz)
+
+            (fwd_and_engine, cold_ms) = measure_cold_start(_load)
+            fwd, _engine = fwd_and_engine
+            if cold_start_ms is None:
+                cold_start_ms = cold_ms
+            stats = measure_latency(
+                fwd,
+                warmup_iters=recipe.measurement.warmup_iters,
+                measure_iters=recipe.measurement.measure_iters,
+            )
+            per_bs[bs] = stats
+        except Exception as e:
+            note_parts.append(f"bs={bs}: run failed ({e})")
+
+    if not per_bs:
+        # Record the failure as a Result so recommend.py can still surface it.
+        finished = datetime.now(timezone.utc).isoformat()
+        result = Result(
+            recipe=recipe.name,
+            started_at=started,
+            finished_at=finished,
+            env=env,  # type: ignore[arg-type]
+            latency_ms=LatencyStats(p50=float("nan"), p95=float("nan"), p99=float("nan")),
+            throughput_fps=ThroughputStats(),
+            peak_gpu_mem_mb=None,
+            cold_start_ms=None,
+            accuracy=AccuracyStats(),
+            meets_constraints=False,
+            notes="; ".join(note_parts) or "all batch sizes failed",
+        )
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(json.loads(result.model_dump_json()), f, indent=2)
+        print(f"wrote {out_path} (FAILED)")
+        return 1
+
+    lat = per_bs.get(1) or next(iter(per_bs.values()))
+    throughput = ThroughputStats(
+        bs1=throughput_from_latency(per_bs[1]["p50"], 1) if 1 in per_bs else None,
+        bs8=throughput_from_latency(per_bs[8]["p50"], 8) if 8 in per_bs else None,
+    )
+    peak_mem = max((v.get("peak_gpu_mem_mb") or 0.0) for v in per_bs.values()) or None
+
+    # Accuracy: ultralytics can load .engine directly via model = YOLO('x.engine')
+    acc = AccuracyStats()
+    if os.environ.get("OMNI_SKIP_ACCURACY"):
+        print("[info] OMNI_SKIP_ACCURACY set — skipping mAP eval", file=sys.stderr)
+    else:
+        try:
+            from ultralytics import YOLO
+
+            # Use the bs=1 engine if it built; otherwise the first one available.
+            eng_for_val = engine_cache / f"{onnx_path.stem}_{dtype}{'_sparse' if sparsity else ''}_bs1.engine"
+            if not eng_for_val.exists():
+                eng_for_val = next(engine_cache.glob(f"{onnx_path.stem}_{dtype}*.engine"))
+            m = YOLO(str(eng_for_val))
+            data_yaml = os.environ.get("OMNI_COCO_YAML", "coco.yaml")
+            metrics = m.val(data=data_yaml, imgsz=imgsz, batch=1, plots=False, verbose=False)
+            acc = AccuracyStats(
+                map_50_95=float(metrics.box.map),
+                map_50=float(metrics.box.map50),
+            )
+        except Exception as e:
+            note_parts.append(f"accuracy eval failed: {e}")
+
+    finished = datetime.now(timezone.utc).isoformat()
+
+    meets = None
+    c = recipe.constraints
+    if c.min_fps_bs1 is not None and throughput.bs1 is not None:
+        meets = throughput.bs1 >= c.min_fps_bs1
+
+    result = Result(
+        recipe=recipe.name,
+        started_at=started,
+        finished_at=finished,
+        env=env,  # type: ignore[arg-type]
+        model_size_mb=None,
+        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99"}}),
+        throughput_fps=throughput,
+        peak_gpu_mem_mb=peak_mem,
+        cold_start_ms=cold_start_ms,
+        accuracy=acc,
+        meets_constraints=meets,
+        notes="; ".join(note_parts) or None,
+    )
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(json.loads(result.model_dump_json()), f, indent=2)
+    print(f"wrote {out_path}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--recipe", required=True)
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+    return run(args.recipe, args.out)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

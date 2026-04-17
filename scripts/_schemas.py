@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
+
+
+class ModelSpec(BaseModel):
+    family: str
+    variant: str
+    weights: str
+    ultralytics_version: Optional[str] = None
+
+
+class RuntimeSpec(BaseModel):
+    engine: Literal["pytorch", "onnxruntime", "tensorrt"]
+    mode: Optional[str] = None
+    execution_provider: Optional[str] = None
+    version: Optional[str] = None
+    dtype: Literal["fp32", "fp16", "int8"]
+    sparsity: Optional[str] = None
+
+
+class TechniqueSpec(BaseModel):
+    name: str
+    # Where quantization / sparsity logic comes from.
+    # v1 uses TensorRT's built-in calibrator + SPARSE_WEIGHTS flag.
+    # v1.1+ plans to add "modelopt" (nvidia-modelopt: torch-level quantization
+    # + QDQ-ONNX export) and possibly "ort_quant" for ONNX Runtime's quantizer.
+    source: Literal["trt_builtin", "modelopt", "ort_quant"] = "trt_builtin"
+    calibrator: Optional[str] = None
+    calibration_samples: Optional[int] = None
+    calibration_dataset: Optional[str] = None
+    calibration_seed: Optional[int] = None
+
+
+class HardwareSpec(BaseModel):
+    gpu: Optional[str] = None
+    cuda: Optional[str] = None
+    driver: Optional[str] = None
+    requires_compute_capability_min: Optional[float] = None
+
+
+class MeasurementSpec(BaseModel):
+    dataset: str
+    num_images: int
+    warmup_iters: int
+    measure_iters: int
+    batch_sizes: list[int]
+    input_size: int = 640
+    gpu_clock_lock: bool = True
+    seed: int = 42
+
+
+class ConstraintSpec(BaseModel):
+    max_map_drop_pct: Optional[float] = None
+    min_fps_bs1: Optional[float] = None
+
+
+class Recipe(BaseModel):
+    name: str
+    model: ModelSpec
+    runtime: RuntimeSpec
+    technique: TechniqueSpec
+    hardware: HardwareSpec = Field(default_factory=HardwareSpec)
+    measurement: MeasurementSpec
+    constraints: ConstraintSpec = Field(default_factory=ConstraintSpec)
+
+
+class LatencyStats(BaseModel):
+    p50: float
+    p95: float
+    p99: float
+
+
+class ThroughputStats(BaseModel):
+    bs1: Optional[float] = None
+    bs8: Optional[float] = None
+
+
+class AccuracyStats(BaseModel):
+    map_50: Optional[float] = None
+    map_50_95: Optional[float] = None
+
+
+class EnvInfo(BaseModel):
+    gpu: Optional[str] = None
+    gpu_compute_capability: Optional[str] = None
+    cuda: Optional[str] = None
+    cudnn: Optional[str] = None
+    driver: Optional[str] = None
+    tensorrt: Optional[str] = None
+    os: Optional[str] = None
+    python: Optional[str] = None
+    torch: Optional[str] = None
+    onnxruntime: Optional[str] = None
+    ultralytics: Optional[str] = None
+
+
+class Result(BaseModel):
+    recipe: str
+    started_at: str
+    finished_at: str
+    env: EnvInfo
+    model_size_mb: Optional[float] = None
+    latency_ms: LatencyStats
+    throughput_fps: ThroughputStats = Field(default_factory=ThroughputStats)
+    peak_gpu_mem_mb: Optional[float] = None
+    cold_start_ms: Optional[float] = None
+    accuracy: AccuracyStats = Field(default_factory=AccuracyStats)
+    meets_constraints: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+def load_recipe(path: str) -> Recipe:
+    import yaml
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return Recipe.model_validate(data)

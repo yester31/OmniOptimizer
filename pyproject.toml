@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omnioptimizer"
+version = "0.1.0"
+description = "Vision model inference optimization auto-search tool"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "yester31" }]
+dependencies = [
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "rich>=13.7",
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "pynvml>=11.5",
+    "pycocotools>=2.0.7",
+]
+
+[project.optional-dependencies]
+torch = [
+    "torch>=2.3",
+    "torchvision>=0.18",
+    "ultralytics>=8.3",
+]
+onnx = [
+    "onnx>=1.16",
+    "onnxruntime-gpu>=1.18",
+]
+trt = [
+    "tensorrt>=10.0",
+    "polygraphy>=0.49",
+]
+all = [
+    "omnioptimizer[torch,onnx,trt]",
+]
+
+[project.scripts]
+omni-run-pytorch = "scripts.run_pytorch:main"
+omni-run-ort = "scripts.run_ort:main"
+omni-run-trt = "scripts.run_trt:main"
+omni-recommend = "scripts.recommend:main"
+
+[tool.setuptools]
+packages = ["scripts"]

@@ -1,0 +1,28 @@
+name: ort_cuda_fp16
+model:
+  family: yolo26
+  variant: n
+  weights: yolo26n.pt
+  ultralytics_version: null
+runtime:
+  engine: onnxruntime
+  execution_provider: CUDAExecutionProvider
+  dtype: fp16
+technique:
+  name: none
+hardware:
+  gpu: null
+  cuda: null
+  driver: null
+measurement:
+  dataset: coco_val2017
+  num_images: 500
+  warmup_iters: 100
+  measure_iters: 100
+  batch_sizes: [1, 8]
+  input_size: 640
+  gpu_clock_lock: true
+  seed: 42
+constraints:
+  max_map_drop_pct: 1.0
+  min_fps_bs1: 30
