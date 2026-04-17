@@ -3,25 +3,28 @@
 Vision 모델을 특정 기기에 배포할 때, 여러 추론 엔진 × 여러 최적화 기법을
 자동으로 돌려 보고 "이 환경엔 이게 제일 낫다"는 1등 추천을 뱉는 도구.
 
-v1은 **YOLO26n × NVIDIA GPU 1대**에서 아래 11장 레시피를 끝까지 돌립니다.
+v1은 **YOLO26n × NVIDIA GPU 1대**에서 아래 12장 레시피를 끝까지 돌립니다.
 
-| #  | Runtime                    | Technique                              | Source       |
-|---:|----------------------------|----------------------------------------|--------------|
-| 1  | PyTorch eager              | FP32 (baseline)                        | —            |
-| 2  | PyTorch + `torch.compile`  | FP16                                   | —            |
-| 3  | ONNX Runtime (CUDA EP)     | FP16                                   | —            |
-| 4  | ONNX Runtime (TensorRT EP) | FP16                                   | —            |
-| 5  | TensorRT                   | FP16                                   | —            |
-| 6  | TensorRT                   | INT8 PTQ (entropy, 512 calib samples)  | `trt_builtin`|
-| 7  | TensorRT                   | INT8 PTQ + 2:4 Sparsity (Ampere+)      | `trt_builtin`|
-| 8  | TensorRT                   | INT8 PTQ (modelopt, max calib)         | `modelopt`   |
-| 9  | TensorRT                   | INT8 PTQ (modelopt, entropy calib)     | `modelopt`   |
-| 10 | TensorRT                   | INT8 PTQ (modelopt, percentile calib)  | `modelopt`   |
-| 11 | TensorRT                   | INT8 PTQ + 2:4 Sparsity (modelopt)     | `modelopt`   |
+| #  | Runtime                    | Technique                                        | Source       |
+|---:|----------------------------|--------------------------------------------------|--------------|
+| 1  | PyTorch eager              | FP32 (baseline)                                  | —            |
+| 2  | PyTorch + `torch.compile`  | FP16                                             | —            |
+| 3  | ONNX Runtime (CUDA EP)     | FP16                                             | —            |
+| 4  | ONNX Runtime (TensorRT EP) | FP16                                             | —            |
+| 5  | TensorRT                   | FP16                                             | —            |
+| 6  | TensorRT                   | INT8 PTQ (entropy, 512 calib samples)            | `trt_builtin`|
+| 7  | TensorRT                   | INT8 PTQ + 2:4 Sparsity (Ampere+)                | `trt_builtin`|
+| 8  | TensorRT                   | INT8 PTQ (modelopt, max calib)                   | `modelopt`   |
+| 9  | TensorRT                   | INT8 PTQ (modelopt, entropy calib)               | `modelopt`   |
+| 10 | TensorRT                   | INT8 PTQ (modelopt, percentile calib)            | `modelopt`   |
+| 11 | TensorRT                   | INT8 PTQ + real 2:4 Sparsity (modelopt.sparsify) | `modelopt`   |
+| 12 | TensorRT                   | INT8 PTQ + FP16 excludes (stem + cv2.*)          | `modelopt`   |
 
-레시피 #8–#11은 NVIDIA ModelOpt의 ONNX-path PTQ로, `trt_builtin` INT8
-캘리브레이터의 mAP drop 문제(-7.9%p)를 **-1.7%p까지 개선**합니다. 자세한
-비교는 `report.md` 참조.
+레시피 #8–#10은 NVIDIA ModelOpt의 ONNX-path PTQ로, `trt_builtin` INT8
+캘리브레이터의 mAP drop 문제(-7.9%p)를 **-1.7%p까지 개선**합니다. v1.2에서
+#11이 실제 2:4 structured sparsity를 주입하고 (v1.1은 `SPARSE_WEIGHTS`
+플래그만이라 no-op이었음), #12가 민감 레이어(stem + bbox regression head)를
+FP16에 남겨 혼합 정밀도로 mAP drop을 더 줄입니다. 자세한 비교는 `report.md`.
 
 ## Quick start (Docker 권장)
 
@@ -131,6 +134,19 @@ constraints:
 
 모델옵트 경로는 ultralytics의 inference head 파이프를 보존하므로 validator가
 그대로 호환됩니다.
+
+#### v1.2 옵션 필드
+
+- **`technique.sparsity_preprocess: "2:4"`** — ONNX export 전에
+  `modelopt.torch.sparsity.sparsify(mode="sparse_magnitude")`로 가중치를
+  2:4 패턴으로 사전 pruning. 이게 있어야 TRT의 `SPARSE_WEIGHTS` 플래그가
+  실제 sparse INT8 tactic을 선택합니다. 단독으로 플래그만 세우는 v1.1
+  경로는 no-op이었음.
+- **`technique.nodes_to_exclude: [str]`** — modelopt QDQ 주입 시 해당 ONNX
+  노드를 FP16에 남깁니다. 전형적 후보: stem Conv (`/model.0/conv/Conv`),
+  detect head bbox regression (`/model.23/cv2.*/Conv`). classification
+  branch (`/model.23/cv3.*/Conv`)는 softmax 덕에 INT8 오차에 robust하므로
+  **일반적으로 exclude에 포함하지 않습니다** — 넣으면 fps만 깎임.
 
 ## 설계 배경
 
