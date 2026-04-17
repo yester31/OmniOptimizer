@@ -53,23 +53,30 @@ def _seed_all(seed: int) -> None:
         pass
 
 
-def _export_onnx(weights: str, imgsz: int, half: bool, cache_dir: Path) -> Path:
+def _export_onnx(weights: str, imgsz: int, half: bool, cache_dir: Path,
+                 dynamic: bool = True) -> Path:
+    """Export YOLO weights to ONNX, defaulting to dynamic batch so a single
+    ONNX can drive both bs=1 and bs>1 engines."""
     from ultralytics import YOLO
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    tag = f"{Path(weights).stem}_{imgsz}_{'fp16' if half else 'fp32'}.onnx"
+    bs_tag = "dyn" if dynamic else "bs1"
+    tag = f"{Path(weights).stem}_{imgsz}_{'fp16' if half else 'fp32'}_{bs_tag}.onnx"
     cached = cache_dir / tag
     if cached.exists():
         return cached
     model = YOLO(weights)
-    onnx_path = model.export(format="onnx", imgsz=imgsz, half=False, simplify=True, dynamic=False)
+    onnx_path = model.export(
+        format="onnx", imgsz=imgsz, half=False, simplify=True, dynamic=dynamic,
+    )
     src = Path(onnx_path)
     if src != cached:
         src.rename(cached)
     return cached
 
 
-def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path) -> Path:
+def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
+                           dynamic: bool = True) -> Path:
     """Quantize via modelopt.onnx — takes ultralytics' clean ONNX export and
     injects QDQ nodes using COCO calibration images.
 
@@ -87,12 +94,14 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path) -> Path:
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     calibrator = recipe.technique.calibrator or "max"  # max | entropy | percentile
-    tag = f"{Path(recipe.model.weights).stem}_{imgsz}_modelopt_{calibrator}.onnx"
+    bs_tag = "dyn" if dynamic else "bs1"
+    tag = f"{Path(recipe.model.weights).stem}_{imgsz}_modelopt_{calibrator}_{bs_tag}.onnx"
     cached = cache_dir / tag
     if cached.exists():
         return cached
 
-    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False, cache_dir=cache_dir)
+    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
+                              cache_dir=cache_dir, dynamic=dynamic)
 
     samples = recipe.technique.calibration_samples or 512
     seed = recipe.technique.calibration_seed or 42
@@ -141,18 +150,25 @@ def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed
     return rng_np.standard_normal((n_samples, 3, imgsz, imgsz), dtype=np.float32)
 
 
-def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path) -> tuple[Path, bool]:
+def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
+                  bs: int) -> tuple[Path, bool]:
     """Dispatch to the right ONNX preparation path based on technique.source.
 
+    For bs=1 we prefer a static ONNX because ultralytics' dynamic export
+    carries extra shape-tracking nodes that TRT does not fold as aggressively
+    — measured ~40% bs=1 slowdown on YOLO26n. For bs>1 we must use dynamic.
+
     Returns (onnx_path, quant_preapplied). When quant_preapplied is True the
-    ONNX carries QDQ nodes and `_build_engine` must skip its INT8 flag +
-    calibrator logic.
+    ONNX carries QDQ nodes and `_build_engine` must skip its calibrator.
     """
     source = recipe.technique.source
+    dynamic = bs > 1
     if source == "trt_builtin":
-        return _export_onnx(recipe.model.weights, imgsz, half=False, cache_dir=cache_dir), False
+        path = _export_onnx(recipe.model.weights, imgsz, half=False,
+                            cache_dir=cache_dir, dynamic=dynamic)
+        return path, False
     if source == "modelopt":
-        return _prepare_modelopt_onnx(recipe, imgsz, cache_dir), True
+        return _prepare_modelopt_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     if source == "ort_quant":
         raise NotImplementedError(
             "technique.source='ort_quant' is not in the OmniOptimizer roadmap yet."
@@ -470,7 +486,6 @@ def run(recipe_path: str, out_path: str) -> int:
     engine_cache = Path("results/_engines")
     engine_cache.mkdir(parents=True, exist_ok=True)
 
-    onnx_path, quant_preapplied = _prepare_onnx(recipe, imgsz, onnx_cache)
     dtype = recipe.runtime.dtype
     sparsity = recipe.runtime.sparsity
 
@@ -479,10 +494,12 @@ def run(recipe_path: str, out_path: str) -> int:
 
     per_bs: dict[int, dict] = {}
     cold_start_ms: Optional[float] = None
+    bs1_engine: Optional[Path] = None  # referenced later for mAP eval
 
     source = recipe.technique.source
     source_suffix = "" if source == "trt_builtin" else f"_{source}"
     for bs in recipe.measurement.batch_sizes:
+        onnx_path, quant_preapplied = _prepare_onnx(recipe, imgsz, onnx_cache, bs)
         engine_tag = f"{onnx_path.stem}_{dtype}{'_sparse' if sparsity else ''}{source_suffix}_bs{bs}.engine"
         engine_path = engine_cache / engine_tag
 
@@ -500,6 +517,8 @@ def run(recipe_path: str, out_path: str) -> int:
         if built is None:
             note_parts.append(f"bs={bs}: build failed ({err})")
             continue
+        if bs == 1:
+            bs1_engine = built
 
         try:
             def _load(e=built, b=bs):
@@ -555,13 +574,19 @@ def run(recipe_path: str, out_path: str) -> int:
         try:
             from ultralytics import YOLO
 
-            # Use the bs=1 engine if it built; otherwise the first one available.
-            eng_for_val = engine_cache / f"{onnx_path.stem}_{dtype}{'_sparse' if sparsity else ''}_bs1.engine"
-            if not eng_for_val.exists():
-                eng_for_val = next(engine_cache.glob(f"{onnx_path.stem}_{dtype}*.engine"))
+            # Prefer the bs=1 engine we just built; fall back to any engine
+            # from this run. This keeps the mAP eval at batch=1 (the setup
+            # ultralytics + the engine's optimization profile both expect).
+            eng_for_val = bs1_engine
+            if eng_for_val is None or not eng_for_val.exists():
+                matches = sorted(engine_cache.glob(f"*{dtype}{source_suffix}_bs1.engine"))
+                if not matches:
+                    raise RuntimeError("no bs=1 engine available for mAP eval")
+                eng_for_val = matches[-1]
             m = YOLO(str(eng_for_val))
             data_yaml = os.environ.get("OMNI_COCO_YAML", "coco.yaml")
-            metrics = m.val(data=data_yaml, imgsz=imgsz, batch=1, plots=False, verbose=False)
+            metrics = m.val(data=data_yaml, imgsz=imgsz, batch=1, device=0,
+                            plots=False, verbose=False)
             acc = AccuracyStats(
                 map_50_95=float(metrics.box.map),
                 map_50=float(metrics.box.map50),

@@ -1,36 +1,36 @@
 {
   "recipe": "torchcompile_fp16",
-  "started_at": "2026-04-17T04:40:47.717648+00:00",
-  "finished_at": "2026-04-17T04:47:19.068546+00:00",
+  "started_at": "2026-04-17T10:16:45.408995+00:00",
+  "finished_at": "2026-04-17T10:25:05.457971+00:00",
   "env": {
     "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
     "gpu_compute_capability": "8.6",
-    "cuda": "12.9",
-    "cudnn": "91002",
+    "cuda": "12.4",
+    "cudnn": "90100",
     "driver": "576.80",
-    "tensorrt": "10.16.0.72",
-    "os": "Windows 11",
-    "python": "3.13.3",
-    "torch": "2.8.0+cu129",
-    "onnxruntime": "1.24.4",
+    "tensorrt": "10.16.1.11",
+    "os": "Linux 5.15.167.4-microsoft-standard-WSL2",
+    "python": "3.10.12",
+    "torch": "2.6.0+cu124",
+    "onnxruntime": "1.22.0",
     "ultralytics": "8.4.27"
   },
   "model_size_mb": 5.287602424621582,
   "latency_ms": {
-    "p50": 21.61145000718534,
-    "p95": 42.23125999851617,
-    "p99": 49.45467000128722
+    "p50": 6.0737100000025634,
+    "p95": 7.015875250001358,
+    "p99": 7.635488830000132
   },
   "throughput_fps": {
-    "bs1": 46.2717679594623,
-    "bs8": 278.4647542185826
+    "bs1": 164.64401494302132,
+    "bs8": 378.29625486227394
   },
-  "peak_gpu_mem_mb": 160.30078125,
-  "cold_start_ms": 3311.339100007899,
+  "peak_gpu_mem_mb": 414.888671875,
+  "cold_start_ms": 3059.3356010000007,
   "accuracy": {
-    "map_50": 0.5530061766541492,
-    "map_50_95": 0.39969704001101436
+    "map_50": 0.5530777509066855,
+    "map_50_95": 0.3995982238339096
   },
   "meets_constraints": true,
-  "notes": "torch.compile unavailable, fell back to eager: TritonMissing: Cannot find a working triton installation. Either the package is not installed or it is too old. More information on installing Triton can be found at: https://github.com/triton-lang/triton\n\nSet TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=\"+dynamo\"\n"
+  "notes": null
 }

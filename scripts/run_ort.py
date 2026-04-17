@@ -47,18 +47,23 @@ def _seed_all(seed: int) -> None:
         pass
 
 
-def _export_onnx(weights: str, imgsz: int, half: bool, cache_dir: Path) -> Path:
-    """Export ultralytics weights to ONNX if not already cached."""
+def _export_onnx(weights: str, imgsz: int, half: bool, cache_dir: Path,
+                 dynamic: bool = True) -> Path:
+    """Export ultralytics weights to ONNX. Dynamic batch by default so ORT
+    sessions can run both bs=1 and bs>1 without a second export."""
     from ultralytics import YOLO
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    tag = f"{Path(weights).stem}_{imgsz}_{'fp16' if half else 'fp32'}.onnx"
+    bs_tag = "dyn" if dynamic else "bs1"
+    tag = f"{Path(weights).stem}_{imgsz}_{'fp16' if half else 'fp32'}_{bs_tag}.onnx"
     cached = cache_dir / tag
     if cached.exists():
         return cached
 
     model = YOLO(weights)
-    onnx_path = model.export(format="onnx", imgsz=imgsz, half=half, simplify=True, dynamic=False)
+    onnx_path = model.export(
+        format="onnx", imgsz=imgsz, half=half, simplify=True, dynamic=dynamic,
+    )
     src = Path(onnx_path)
     if src != cached:
         src.rename(cached)
@@ -111,35 +116,36 @@ def run(recipe_path: str, out_path: str) -> int:
     imgsz = recipe.measurement.input_size
 
     cache_dir = Path("results/_onnx")
-    onnx_path = _export_onnx(recipe.model.weights, imgsz, half, cache_dir)
+    # Keep one ONNX reference around for the mAP eval path; per-bs loop
+    # rebuilds dedicated sessions from static/dynamic ONNX to keep CUDA EP
+    # fast at bs=1 while still allowing bs>1.
+    onnx_path_default = _export_onnx(recipe.model.weights, imgsz, half,
+                                     cache_dir, dynamic=False)
 
     started = datetime.now(timezone.utc).isoformat()
 
-    def _load():
-        return _make_session(onnx_path, ep)
-
-    session, cold_start_ms = measure_cold_start(_load)
-
-    input_meta = session.get_inputs()[0]
-    input_name = input_meta.name
-    # Use actual input dtype from the session (ultralytics sometimes exports FP32
-    # inputs even when half=True was requested).
     ort_type_to_np = {
         "tensor(float)": np.float32,
         "tensor(float16)": np.float16,
     }
-    actual_dtype_np = ort_type_to_np.get(input_meta.type, dtype_np)
-    if actual_dtype_np != dtype_np:
-        print(
-            f"[info] session input dtype is {input_meta.type}, using {actual_dtype_np} for feed",
-            file=sys.stderr,
-        )
 
     per_bs: dict[int, dict] = {}
+    cold_start_ms = None
     for bs in recipe.measurement.batch_sizes:
-        # If the exported model has a fixed batch dim, only bs=1 is valid.
-        shape_with_bs = (bs, 3, imgsz, imgsz)
+        onnx_for_bs = _export_onnx(recipe.model.weights, imgsz, half,
+                                   cache_dir, dynamic=(bs > 1))
         try:
+            def _load(p=onnx_for_bs):
+                return _make_session(p, ep)
+
+            session, this_cold_ms = measure_cold_start(_load)
+            if cold_start_ms is None:
+                cold_start_ms = this_cold_ms
+
+            input_meta = session.get_inputs()[0]
+            input_name = input_meta.name
+            actual_dtype_np = ort_type_to_np.get(input_meta.type, dtype_np)
+            shape_with_bs = (bs, 3, imgsz, imgsz)
             fwd = _make_forward(session, input_name, shape_with_bs, actual_dtype_np)
             stats = measure_latency(
                 fwd,
@@ -168,9 +174,10 @@ def run(recipe_path: str, out_path: str) -> int:
         try:
             from ultralytics import YOLO
 
-            m = YOLO(str(onnx_path))
+            m = YOLO(str(onnx_path_default))
             data_yaml = os.environ.get("OMNI_COCO_YAML", "coco.yaml")
-            metrics = m.val(data=data_yaml, imgsz=imgsz, batch=1, half=half, plots=False, verbose=False)
+            metrics = m.val(data=data_yaml, imgsz=imgsz, batch=1, half=half,
+                            device=0, plots=False, verbose=False)
             acc = AccuracyStats(
                 map_50_95=float(metrics.box.map),
                 map_50=float(metrics.box.map50),
@@ -179,7 +186,7 @@ def run(recipe_path: str, out_path: str) -> int:
             print(f"[warn] accuracy eval failed for {ep}: {e}", file=sys.stderr)
 
     try:
-        model_size_mb = onnx_path.stat().st_size / (1024 ** 2)
+        model_size_mb = onnx_path_default.stat().st_size / (1024 ** 2)
     except Exception:
         model_size_mb = None
 
@@ -202,7 +209,7 @@ def run(recipe_path: str, out_path: str) -> int:
         cold_start_ms=cold_start_ms,
         accuracy=acc,
         meets_constraints=meets,
-        notes=f"execution_provider={ep}, onnx={onnx_path.name}",
+        notes=f"execution_provider={ep}, onnx={onnx_path_default.name}",
     )
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)

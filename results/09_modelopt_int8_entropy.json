@@ -1,7 +1,7 @@
 {
   "recipe": "modelopt_int8_entropy",
-  "started_at": "2026-04-17T13:05:58.698624+00:00",
-  "finished_at": "2026-04-17T13:13:07.390922+00:00",
+  "started_at": "2026-04-17T16:39:29.888786+00:00",
+  "finished_at": "2026-04-17T17:05:03.748219+00:00",
   "env": {
     "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
     "gpu_compute_capability": "8.6",
@@ -17,20 +17,20 @@
   },
   "model_size_mb": null,
   "latency_ms": {
-    "p50": 2.5558265000427127,
-    "p95": 4.373113199994805,
-    "p99": 4.9503824499970515
+    "p50": 2.4797969999781344,
+    "p95": 2.9827697497239565,
+    "p99": 3.2055710489294147
   },
   "throughput_fps": {
-    "bs1": 391.2628654500953,
-    "bs8": null
+    "bs1": 403.25881514043994,
+    "bs8": 689.2982228700766
   },
-  "peak_gpu_mem_mb": 4.69482421875,
-  "cold_start_ms": 133.81373699996857,
+  "peak_gpu_mem_mb": 38.05517578125,
+  "cold_start_ms": 95.88862800046627,
   "accuracy": {
-    "map_50": 0.5359145928289293,
-    "map_50_95": 0.3794994215583316
+    "map_50": 0.5366964274625752,
+    "map_50_95": 0.380215526256856
   },
   "meets_constraints": true,
-  "notes": "bs=8: build failed (engine build returned None)"
+  "notes": null
 }
