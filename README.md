@@ -3,17 +3,25 @@
 Vision 모델을 특정 기기에 배포할 때, 여러 추론 엔진 × 여러 최적화 기법을
 자동으로 돌려 보고 "이 환경엔 이게 제일 낫다"는 1등 추천을 뱉는 도구.
 
-v1은 **YOLO26n × NVIDIA GPU 1대**에서 아래 7장 레시피를 끝까지 돌립니다.
+v1은 **YOLO26n × NVIDIA GPU 1대**에서 아래 11장 레시피를 끝까지 돌립니다.
 
-| #  | Runtime                    | Technique                              |
-|---:|----------------------------|----------------------------------------|
-| 1  | PyTorch eager              | FP32 (baseline)                        |
-| 2  | PyTorch + `torch.compile`  | FP16                                   |
-| 3  | ONNX Runtime (CUDA EP)     | FP16                                   |
-| 4  | ONNX Runtime (TensorRT EP) | FP16                                   |
-| 5  | TensorRT                   | FP16                                   |
-| 6  | TensorRT                   | INT8 PTQ (entropy, 512 calib samples)  |
-| 7  | TensorRT                   | INT8 PTQ + 2:4 Sparsity (Ampere+)      |
+| #  | Runtime                    | Technique                              | Source       |
+|---:|----------------------------|----------------------------------------|--------------|
+| 1  | PyTorch eager              | FP32 (baseline)                        | —            |
+| 2  | PyTorch + `torch.compile`  | FP16                                   | —            |
+| 3  | ONNX Runtime (CUDA EP)     | FP16                                   | —            |
+| 4  | ONNX Runtime (TensorRT EP) | FP16                                   | —            |
+| 5  | TensorRT                   | FP16                                   | —            |
+| 6  | TensorRT                   | INT8 PTQ (entropy, 512 calib samples)  | `trt_builtin`|
+| 7  | TensorRT                   | INT8 PTQ + 2:4 Sparsity (Ampere+)      | `trt_builtin`|
+| 8  | TensorRT                   | INT8 PTQ (modelopt, max calib)         | `modelopt`   |
+| 9  | TensorRT                   | INT8 PTQ (modelopt, entropy calib)     | `modelopt`   |
+| 10 | TensorRT                   | INT8 PTQ (modelopt, percentile calib)  | `modelopt`   |
+| 11 | TensorRT                   | INT8 PTQ + 2:4 Sparsity (modelopt)     | `modelopt`   |
+
+레시피 #8–#11은 NVIDIA ModelOpt의 ONNX-path PTQ로, `trt_builtin` INT8
+캘리브레이터의 mAP drop 문제(-7.9%p)를 **-1.7%p까지 개선**합니다. 자세한
+비교는 `report.md` 참조.
 
 ## Quick start (Docker 권장)
 
@@ -38,11 +46,21 @@ cat report.md
 
 `make all`이 끝나면:
 
-- `results/01_pytorch_fp32.json` … `results/07_trt_int8_sparsity.json` — 레시피별 측정값.
+- `results/01_pytorch_fp32.json` … `results/11_modelopt_int8_sparsity.json` — 레시피별 측정값.
 - `results/_env.json` — 실행 환경 스냅샷 (GPU, CUDA, 드라이버, 버전).
-- `report.md` — 순위표 + 추천 한 줄.
+- `report.md` — Windows/WSL 비교 순위표 + 시나리오별 추천.
 
 각 JSON은 `scripts/_schemas.py::Result` 스키마를 따릅니다.
+
+### INT8 캘리브레이션 데이터셋
+
+ModelOpt 계열(#8–#11)은 COCO val 이미지로 캘리브레이션합니다:
+
+```bash
+export OMNI_COCO_YAML=$PWD/coco_val_only.yaml   # val2017.txt 경로 포함
+```
+
+미설정 시 random-normal 텐서로 폴백합니다(정확도 저하 큼).
 
 ## 재현성 체크
 
@@ -101,6 +119,18 @@ constraints:
 
 새 런타임·기법을 추가하려면: `recipes/`에 YAML 한 장 + 해당 runner
 (`run_pytorch.py` / `run_ort.py` / `run_trt.py`) 에 dispatch 분기 추가.
+
+### `technique.source` 디스패처 (v1.1+)
+
+`run_trt.py`는 INT8/sparsity 백엔드를 `technique.source`로 라우팅합니다:
+
+- `trt_builtin` (기본): TRT 내장 IInt8EntropyCalibrator2 + SPARSE_WEIGHTS.
+- `modelopt`: `modelopt.onnx.quantization.quantize`로 clean ONNX에 QDQ 주입.
+  caliber별 스케일(`max`/`entropy`/`percentile`)은 `technique.calibrator`로 선택.
+- `ort_quant`: 예약됨 (미구현).
+
+모델옵트 경로는 ultralytics의 inference head 파이프를 보존하므로 validator가
+그대로 호환됩니다.
 
 ## 설계 배경
 
