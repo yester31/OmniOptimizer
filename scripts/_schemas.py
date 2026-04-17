@@ -32,6 +32,14 @@ class TechniqueSpec(BaseModel):
     calibration_samples: Optional[int] = None
     calibration_dataset: Optional[str] = None
     calibration_seed: Optional[int] = None
+    # v1.2: when set, apply structured weight pruning *before* QDQ injection
+    # so the engine builder can pick real 2:4 sparse INT8 kernels. The plain
+    # runtime.sparsity flag alone only sets SPARSE_WEIGHTS, which is a no-op
+    # unless the weights actually have the 2:4 pattern.
+    sparsity_preprocess: Optional[Literal["2:4"]] = None
+    # v1.2: ONNX node names to leave at FP16 during modelopt.onnx quantize.
+    # Protects sensitivity-critical layers (stem Conv, detect head branches).
+    nodes_to_exclude: Optional[list[str]] = None
 
 
 class HardwareSpec(BaseModel):
