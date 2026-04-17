@@ -16,6 +16,7 @@ technique:
   calibration_samples: 512
   calibration_dataset: coco_val2017
   calibration_seed: 42
+  sparsity_preprocess: "2:4"   # v1.2: real 2:4 via modelopt.torch.sparsify
 hardware:
   gpu: null
   cuda: null
