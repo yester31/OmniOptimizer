@@ -16,7 +16,12 @@ technique:
   calibration_samples: 512
   calibration_dataset: coco_val2017
   calibration_seed: 42
-  sparsity_preprocess: "2:4"   # v1.2: real 2:4 via modelopt.torch.sparsify
+  # v1.2 update: sparsity_preprocess="2:4" was tested and rejected on YOLO26n.
+  # Post-training magnitude pruning without SAT/QAT collapses mAP (see
+  # report.md "Known limitations"). The runtime.sparsity flag below remains
+  # for the SPARSE_WEIGHTS hint (harmless no-op on dense weights). Real 2:4
+  # with sparsity-aware training is deferred to v1.3.
+  # sparsity_preprocess: "2:4"
 hardware:
   gpu: null
   cuda: null
