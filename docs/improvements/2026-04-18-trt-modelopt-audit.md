@@ -432,6 +432,149 @@ C API를 상속하는 Python 클래스. Recipe #6 (trt_builtin) 전용.
 
 ---
 
+---
+
+## v2 전문가 재검토 (2026-04-18, 같은 날 두 번째 패스)
+
+첫 번째 패스 작성 후 숫자와 가정을 비판적으로 다시 봤습니다. 다음이 수정 사항.
+
+### 수정 A — H1 (CUDA graph) 효과 과대 주장
+
+**원본 주장:** "bs=1 p50 −8~−15%"
+**근거 재점검:** YOLO26n p50 = 3.6 ms. Python + TRT launch overhead는 최신 드라이버에서
+통상 0.1–0.3 ms/call. 15% (= 0.54 ms) 단축은 가능하지만 **상한**이고 평균은 1–4%
+선이 현실적. nano 모델일수록 kernel launch 비율이 높지 않아 이득이 작음.
+
+**수정:** H1의 기대 이득을 **bs=1 p50 −3~−8% (경험 상한 −12%)**로 하향. 여전히 가치 있으나
+"🔥 매우 큼"은 과장. **"🔥 큼"** 수준으로 재분류.
+
+**추가 정정 — 구현 경로:**
+원본은 `cuda-python` 바인딩 추가를 제안. 더 나은 경로: **`torch.cuda.CUDAGraph`** (PyTorch
+1.10+ 내장 API). 이미 의존성에 있음. `torch` 스트림과 TRT execution context가 같은 스트림을
+쓰는 현 코드와 호환.
+
+```python
+g = torch.cuda.CUDAGraph()
+with torch.cuda.graph(g, stream=stream):
+    context.execute_async_v3(stream.cuda_stream)
+# 이후
+def fwd():
+    g.replay()
+    stream.synchronize()
+```
+
+cuda-python 의존 제거 + 더 단순.
+
+### 수정 B — H3 (AutoTune / AutoQuantize) 오클레임
+
+**원본 주장:** "🔥 큼", recipe #12를 "진화"
+**사실:**
+1. **AutoTune은 latency 튜너**. "mAP drop을 줄이는" 도구가 아님. recipe #12의 목표(1%p mAP
+   아래)는 AutoTune으로 달성할 수 없음. AutoTune은 "정확도는 기존 QDQ 그대로, latency만
+   더 빠르게" 상황에 맞음. 우리 현재 수치가 recipe-09 기준 이미 fps 403 (bs=1) → 더 빨라져봤자
+   한계 효용.
+2. **AutoTune 실행 비용**: schemes_per_region × regions 회 TRT INT8 엔진 빌드. RTX 3060 Laptop
+   YOLO26n INT8 빌드는 ~90–120s. quick 모드라도 수십 분, default 수 시간, extensive 반나절+.
+3. **AutoQuantize는 training-dependent**. forward + loss + 레이블 필요. 현재 사용자 지침
+   ("학습 코드 추가 전까지 ...")과 충돌. v1.3 training 통합 시만 유효.
+
+**수정:**
+- **H3 재분류: "AutoTune은 M급, AutoQuantize는 v1.3으로 제외"**
+- AutoTune은 별도 실험 타겟으로만 도입 (`make autotune-recipe-09` 처럼 수동 실행). `make all`
+  포함 금지.
+- AutoQuantize는 학습 코드 합류 후 재평가.
+
+### 수정 C — M2 (`kOBEY_PRECISION_CONSTRAINTS`) 적용 대상 오해
+
+**원본 주장:** "`nodes_to_exclude`를 TRT가 실제 강제"
+**사실:** modelopt의 `nodes_to_exclude`는 QDQ 주입 단계에서 **해당 노드에 Q/DQ를 안 넣는**
+방식으로 동작. 결과 QDQ-ONNX에는 그 노드 주변에 QDQ가 없음. TRT는 QDQ 없는 영역을 **FP16/FP32
+중 더 빠른 것**으로 자유롭게 선택. `kOBEY_PRECISION_CONSTRAINTS`는 **`network->setPrecision()`
+API 호출에 대해 적용**, QDQ-ONNX 모델에는 직접 영향 제한적.
+
+**수정:** M2는 효과 불확실로 **"요검증" 태그**. Recipe #12 mAP 개선 기대는 근거 약함. 대신:
+- `modelopt.onnx.autocast.convert_to_mixed_precision(..., low_precision_type="fp16",
+  nodes_to_exclude=...)`을 QDQ 주입 **이후**에 추가 실행해서 비-QDQ 노드를 명시적으로 FP16
+  초기화자로 바꾸는 경로가 더 정확.
+- 또는 build 시점에 **layer-level `setPrecision` API를 직접 호출**. ONNX 파싱 후 network를
+  walk해서 제외 대상 레이어에 precision 강제. 구현 복잡도↑.
+
+**권고:** M2는 초기 구현 대상에서 제외. 필요 시 별도 실험으로 분리.
+
+### 수정 D — M1 (TF32) 기대 이득 정정 + 확인 필요
+
+**원본 주장:** "p50 −5~−10%"
+**사실:** YOLO는 Conv 위주에 3×3 kernel + 작은 채널 (nano). TF32는 GEMM과 큰 Conv에 이득이 큼.
+nano 모델에선 **1–4%** 가 현실적. 또한 TRT 10에서 **TF32는 Ampere+에서 기본 on**일 가능성 (공식
+문서 명확하지 않음). 먼저 현재 recipe #1(PyTorch fp32 baseline이 아닌 **TRT FP32가 현재 없음**)을
+만들어서 flag on/off로 실측해야 근거가 생김.
+
+**수정:** M1을 "TRT FP32 baseline 레시피 신규 추가 + TF32 flag 토글 실험"으로 구조화. 숫자 기대는
+잠정 1–4%로 하향.
+
+### 누락 발견 항목 (추가)
+
+#### 신규 N1. Calibration 전처리 RGB/BGR 확인 (잠재 mAP 훼손)
+
+`_build_calib_numpy` → `_letterbox`는:
+```python
+rgb_chw = canvas[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
+```
+즉 BGR (cv2.imread) → RGB 로 반전. 반면 ultralytics YOLO의 ONNX export는 내부적으로 어떤 채널
+순서를 기대하는지 **확인 안 됨**. 만약 mismatch면 calibration scale이 편향되어 mAP drop
+원인이 됨. **검증 필요**:
+```python
+# ultralytics YOLO 기본 preprocessor 확인
+from ultralytics.data.augment import LetterBox
+# 또는 val 루프에서 실제 입력 텐서 추출해서 비교
+```
+공수 최소. 중요도 중 (mAP -0.5~-1%p 의심).
+
+#### 신규 N2. Engine cache 버전 서명
+
+`results/_engines/*.engine`은 파일명에 model hash는 있어도 **CUDA/TRT/driver 버전**이 없음.
+사용자가 TRT 10.16 → 10.17 업그레이드하면 캐시된 엔진이 호환 안 될 수 있는데 파이프라인이
+그대로 reuse. 실패 시 notes에 에러 남기고 `meets_constraints=False`가 되지만 사일런트 mAP 퇴행
+리스크.
+
+**수정:** engine 파일명에 `_trt{major}_{minor}` suffix 추가 또는 `env.tensorrt`를 포함한 hash 값
+prefix. 공수 소.
+
+#### 신규 N3. bs=8 엔진은 mAP 측정 안 됨 (문서화 필요)
+
+현재 `eval_coco.py`는 `bs1_engine`만 사용. 만약 TRT tactic 선택이 bs=1과 bs=8에서 다르게
+numerics가 발생하면 (드문 케이스지만 가능) bs=8 fps 리포트는 정확도 보장이 없음. README에
+이 점을 명시해야 함. 코드 변경 아님.
+
+#### 신규 N4. mAP recomputation on cache hit
+
+`_export_onnx`와 `_build_engine`이 모두 cache-hit path를 가짐. cache hit이면 mAP eval 단계까지
+스킵 안 하고 **매번 실행**. 빠른 반복 시 time-saver지만, 이미 ran 되었는지 불명확한 결과 JSON
+덮어쓰기 위험. 결과 JSON에도 `env.trt/cuda` 버전 도장을 찍고, `recommend.py`가 stale detection.
+
+### 정리된 수정 우선순위표
+
+| # | 항목 | 영향 재평가 | 공수 | 코멘트 |
+|---|---|---|---|---|
+| H2 | Timing cache | 🔥 큼 (확실) | 소 | **제일 먼저 해도 되는 것** |
+| L1 | Random calib fallback → error | 중 (버그 방지) | 최소 | 바로 반영 |
+| N2 | Engine cache version signing | 중 (장기 안전성) | 소 | 같이 반영 |
+| N1 | Calibration RGB/BGR 검증 | 중 (정확도) | 최소 | 3줄 스크립트 |
+| H1 | CUDA graph (torch.cuda.CUDAGraph) | 중~큼 (상한 8-12%) | 중 | torch API 사용 |
+| M3 | CUDA Event 측정 | 중 | 중 | schema 변경 포함, 별도 브랜치 |
+| M1 | TF32 실험 (+ FP32 TRT baseline 레시피) | 소~중 | 소 | 측정으로 이득 확인 |
+| M4 | polygraphy 진단 타겟 | 하 | 소 | 필요할 때 |
+| L3 | deprecated 주석 | 최하 | 최소 | 한 줄 |
+| L2 | Peak memory 이중 측정 | 하 | 소 | schema 확장 |
+| M2 | `OBEY_PRECISION_CONSTRAINTS` | ~~중~~ → **요검증** | 중 | QDQ 경로에선 효과 불명 |
+| H3 | AutoTune | 중 (실험용, 일회성) | 대 | `make all`에서 분리, 별도 |
+| — | AutoQuantize | ~~중~~ → **v1.3** | 대 | 학습 필요 |
+
+**결론:** 원본 순서 1–2번(L1, H2)은 유지, 그 다음은 N1/N2 우선, H1·M3는 큰 브랜치, H3는 별도 에픽.
+M2와 AutoQuantize는 이번 라운드에서 뺌.
+
+---
+
 ## 바로 반영 안 하는 항목 (범위 밖 / 의도적 보류)
 
 - **FP8 / NVFP4 / INT4**: RTX 3060 Laptop (SM 8.6)에서 지원 안 함. Hopper (SM 9.0+) 이상만.
