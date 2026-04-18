@@ -28,3 +28,13 @@ def test_source_literal_accepts_all_backends(src):
 def test_source_literal_rejects_unknown_backend():
     with pytest.raises(Exception):
         TechniqueSpec(name="int8_ptq", source="bogus_backend")
+
+
+def test_source_tag_includes_brevitas():
+    """Engine cache filenames must stay short enough on Windows (MAX_PATH=260)."""
+    from scripts.run_trt import _SOURCE_TAG
+
+    assert _SOURCE_TAG["brevitas"] == "_brev"
+    assert _SOURCE_TAG["trt_builtin"] == ""
+    assert _SOURCE_TAG["modelopt"] == "_modelopt"
+    assert _SOURCE_TAG["ort_quant"] == "_ort"

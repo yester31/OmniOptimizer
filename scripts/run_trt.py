@@ -383,6 +383,7 @@ _SOURCE_TAG = {
     "trt_builtin": "",
     "modelopt": "_modelopt",
     "ort_quant": "_ort",
+    "brevitas": "_brev",
 }
 
 
