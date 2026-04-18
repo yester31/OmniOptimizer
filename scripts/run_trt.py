@@ -435,6 +435,7 @@ def _build_engine(
     calib_samples: int,
     calib_seed: int,
     quant_preapplied: bool = False,
+    enable_tf32: bool = False,
 ) -> tuple[Optional[Path], Optional[str]]:
     """Build a TensorRT engine. Returns (engine_path, note-or-None).
 
@@ -478,7 +479,12 @@ def _build_engine(
     timing_cache = config.create_timing_cache(cache_bytes)
     config.set_timing_cache(timing_cache, ignore_mismatch=False)
 
-    if dtype == "fp16":
+    if dtype == "fp32" and enable_tf32:
+        # TF32 (10-bit mantissa, FP32 dynamic range) on Ampere+ tensor cores.
+        # Near-zero accuracy impact; small speedup on Conv-heavy workloads.
+        config.set_flag(trt.BuilderFlag.TF32)
+        print("[info] FP32 with TF32 tensor cores enabled", file=sys.stderr)
+    elif dtype == "fp16":
         config.set_flag(trt.BuilderFlag.FP16)
     elif dtype == "int8":
         if not builder.platform_has_fast_int8:
@@ -684,6 +690,9 @@ def run(recipe_path: str, out_path: str) -> int:
 
     dtype = recipe.runtime.dtype
     sparsity = recipe.runtime.sparsity
+    # runtime.mode == "tf32" opts the FP32 path into TF32 tensor cores on
+    # Ampere+. No-op for FP16/INT8.
+    enable_tf32 = (recipe.runtime.mode or "").lower() == "tf32"
 
     started = datetime.now(timezone.utc).isoformat()
     note_parts: list[str] = []
@@ -694,9 +703,10 @@ def run(recipe_path: str, out_path: str) -> int:
 
     source = recipe.technique.source
     source_suffix = "" if source == "trt_builtin" else f"_{source}"
+    tf32_suffix = "_tf32" if enable_tf32 else ""
     for bs in recipe.measurement.batch_sizes:
         onnx_path, quant_preapplied = _prepare_onnx(recipe, imgsz, onnx_cache, bs)
-        engine_tag = f"{onnx_path.stem}_{dtype}{'_sparse' if sparsity else ''}{source_suffix}_bs{bs}_{version_tag}.engine"
+        engine_tag = f"{onnx_path.stem}_{dtype}{tf32_suffix}{'_sparse' if sparsity else ''}{source_suffix}_bs{bs}_{version_tag}.engine"
         engine_path = engine_cache / engine_tag
 
         built, err = _build_engine(
@@ -709,6 +719,7 @@ def run(recipe_path: str, out_path: str) -> int:
             calib_samples=recipe.technique.calibration_samples or 0,
             calib_seed=recipe.technique.calibration_seed or recipe.measurement.seed,
             quant_preapplied=quant_preapplied,
+            enable_tf32=enable_tf32,
         )
         if built is None:
             note_parts.append(f"bs={bs}: build failed ({err})")
