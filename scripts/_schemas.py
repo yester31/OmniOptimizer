@@ -86,12 +86,15 @@ class Recipe(BaseModel):
 class LatencyStats(BaseModel):
     # Wall-clock (perf_counter + cuda.synchronize) percentiles — primary
     # metric, captures end-to-end user-visible latency incl. launch overhead.
-    p50: float
-    p95: float
-    p99: float
+    # Optional only so failed-build recipes (engine parse error, OOM, etc.)
+    # can still serialize a Result JSON with p50=None and propagate the
+    # failure reason through Result.notes. Successful runs MUST populate
+    # these; recommend.py treats missing p50 as "no valid measurement".
+    p50: Optional[float] = None
+    p95: Optional[float] = None
+    p99: Optional[float] = None
     # CUDA Event based percentiles — isolates on-GPU execution time from
-    # Python / TRT enqueue overhead. Optional so historical result JSONs
-    # without these fields still load. Populated by measure_latency when
+    # Python / TRT enqueue overhead. Populated by measure_latency when
     # CUDA + torch are available; remains None otherwise.
     p50_gpu: Optional[float] = None
     p95_gpu: Optional[float] = None

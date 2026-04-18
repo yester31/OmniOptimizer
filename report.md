@@ -13,10 +13,16 @@ Baseline: `pytorch_fp32`  |  GPU: `NVIDIA GeForce RTX 3060 Laptop GPU`  |  CUDA:
 | 6 | `ort_cuda_fp16` | 68.5 | 119.3 | 14.60 | — | 0.554 | -0.11%p | — | ✔ |
 | 7 | `pytorch_fp32` | 52.8 | 238.5 | 18.93 | — | 0.553 | +0.00%p | 281 | ✔ |
 | 8 | `trt_int8_ptq` | 785.2 | 670.0 | 1.27 | — | 0.475 | +7.82%p | 38 | ✘ |
-| 9 | `modelopt_int8_mixed` | 418.9 | 859.7 | 2.39 | — | 0.537 | +1.64%p | 38 | ✘ |
-| 10 | `modelopt_int8_entropy` | 409.1 | 859.6 | 2.44 | — | 0.537 | +1.64%p | 38 | ✘ |
-| 11 | `modelopt_int8_ptq` | 400.3 | 766.9 | 2.50 | — | 0.521 | +3.19%p | 38 | ✘ |
-| 12 | `modelopt_int8_percentile` | 366.4 | 777.9 | 2.73 | — | 0.521 | +3.19%p | 38 | ✘ |
+| 9 | `ort_int8_entropy` | 679.3 | 655.4 | 1.47 | — | 0.501 | +5.16%p | 38 | ✘ |
+| 10 | `ort_int8_percentile` | 647.0 | 647.8 | 1.55 | — | 0.528 | +2.50%p | 38 | ✘ |
+| 11 | `ort_int8_distribution` | 644.0 | 629.5 | 1.55 | — | 0.503 | +4.97%p | 38 | ✘ |
+| 12 | `ort_int8_minmax` | 536.1 | 650.6 | 1.87 | — | 0.494 | +5.94%p | 38 | ✘ |
+| 13 | `modelopt_int8_mixed` | 418.9 | 859.7 | 2.39 | — | 0.537 | +1.64%p | 38 | ✘ |
+| 14 | `modelopt_int8_entropy` | 409.1 | 859.6 | 2.44 | — | 0.537 | +1.64%p | 38 | ✘ |
+| 15 | `modelopt_int8_ptq` | 400.3 | 766.9 | 2.50 | — | 0.521 | +3.19%p | 38 | ✘ |
+| 16 | `modelopt_int8_percentile` | 366.4 | 777.9 | 2.73 | — | 0.521 | +3.19%p | 38 | ✘ |
+| 17 | `inc_int8_ptq` | — | — | — | — | — | — | — | ✘ |
+| 18 | `inc_int8_smoothquant` | — | — | — | — | — | — | — | ✘ |
 
 ## Recommendation
 
@@ -26,7 +32,17 @@ Baseline: `pytorch_fp32`  |  GPU: `NVIDIA GeForce RTX 3060 Laptop GPU`  |  CUDA:
 - `ort_trt_fp16`: execution_provider=TensorrtExecutionProvider, onnx=yolo26n_640_fp16_bs1.onnx
 - `ort_cuda_fp16`: execution_provider=CUDAExecutionProvider, onnx=yolo26n_640_fp16_bs1.onnx
 - `trt_int8_ptq`: mAP drop 7.82%p > 1.0%p
+- `ort_int8_entropy`: mAP drop 5.16%p > 1.0%p
+- `ort_int8_percentile`: mAP drop 2.50%p > 1.0%p
+- `ort_int8_distribution`: mAP drop 4.97%p > 1.0%p
+- `ort_int8_minmax`: mAP drop 5.94%p > 1.0%p
 - `modelopt_int8_mixed`: mAP drop 1.64%p > 1.0%p
 - `modelopt_int8_entropy`: mAP drop 1.64%p > 1.0%p
 - `modelopt_int8_ptq`: mAP drop 3.19%p > 1.0%p
 - `modelopt_int8_percentile`: mAP drop 3.19%p > 1.0%p
+- `inc_int8_ptq`: missing measurements | bs=1: build failed (onnx parse failed:
+In node 255 with name: /model.2/Concat and operator: Concat (parseNode): INVALID_GRAPH: Assertion failed: (ctx->tensors().count(inputName)): Node input was not registered.); bs=8: build failed (onnx parse failed:
+In node 255 with name: /model.2/Concat and operator: Concat (parseNode): INVALID_GRAPH: Assertion failed: (ctx->tensors().count(inputName)): Node input was not registered.)
+- `inc_int8_smoothquant`: missing measurements | bs=1: build failed (onnx parse failed:
+In node 625 with name: /model.10/m/m.0/attn/Reshape_2_quant and operator: Reshape (parseNode): INVALID_NODE: Invalid Node - /model.10/m/m.0/attn/Reshape_2_quant
+ITensor::getDimensions: Error Code 4: Shape Error (reshape changes volume. Reshaping [1,2,32,400] to [1,128,20,20]. In nvinfer1::builder::reshapeCanFaultHelper::<lambda_1>::operator () at C:\_src\optimizer\common\shape\shapeContext.cpp:4634)); bs=8: build failed (engine build returned None)

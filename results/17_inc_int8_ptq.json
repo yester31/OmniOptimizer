@@ -1,0 +1,40 @@
+{
+  "recipe": "inc_int8_ptq",
+  "started_at": "2026-04-18T07:51:42.909206+00:00",
+  "finished_at": "2026-04-18T07:57:39.820346+00:00",
+  "env": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu_compute_capability": "8.6",
+    "cuda": "12.9",
+    "cudnn": "91002",
+    "driver": "576.80",
+    "tensorrt": "10.16.0.72",
+    "os": "Windows 11",
+    "python": "3.13.3",
+    "torch": "2.8.0+cu129",
+    "onnxruntime": "1.22.0",
+    "ultralytics": "8.4.27"
+  },
+  "model_size_mb": null,
+  "latency_ms": {
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "p50_gpu": null,
+    "p95_gpu": null,
+    "p99_gpu": null
+  },
+  "throughput_fps": {
+    "bs1": null,
+    "bs8": null
+  },
+  "peak_gpu_mem_mb": null,
+  "peak_gpu_mem_mb_nvml_delta": null,
+  "cold_start_ms": null,
+  "accuracy": {
+    "map_50": null,
+    "map_50_95": null
+  },
+  "meets_constraints": false,
+  "notes": "bs=1: build failed (onnx parse failed:\nIn node 255 with name: /model.2/Concat and operator: Concat (parseNode): INVALID_GRAPH: Assertion failed: (ctx->tensors().count(inputName)): Node input was not registered.); bs=8: build failed (onnx parse failed:\nIn node 255 with name: /model.2/Concat and operator: Concat (parseNode): INVALID_GRAPH: Assertion failed: (ctx->tensors().count(inputName)): Node input was not registered.)"
+}
