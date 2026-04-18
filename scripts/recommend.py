@@ -26,16 +26,29 @@ def _safe(value, default=None):
         return default
 
 
-def load_results(results_dir: Path) -> list[Result]:
+def load_results(results_dir: Path, exclude: Optional[set[str]] = None) -> list[Result]:
+    """Read all result JSONs from a directory, skipping hidden/meta files.
+
+    ``exclude`` is a set of recipe names (``Result.recipe`` field) to drop
+    from the ranking — used to keep a measurement on disk for history while
+    parking it out of the active performance-evaluation table. Matching is
+    by recipe.name, not filename.
+    """
+    exclude = exclude or set()
     items: list[Result] = []
     for p in sorted(results_dir.glob("*.json")):
         if p.name.startswith("_"):
             continue
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            items.append(Result.model_validate(data))
+            result = Result.model_validate(data)
         except Exception as e:
             print(f"[warn] skip {p.name}: {e}", file=sys.stderr)
+            continue
+        if result.recipe in exclude:
+            print(f"[info] excluded from ranking: {result.recipe}", file=sys.stderr)
+            continue
+        items.append(result)
     return items
 
 
@@ -173,9 +186,13 @@ def main() -> int:
     ap.add_argument("--min-fps-bs1", type=float, default=None)
     ap.add_argument("--ignore-accuracy", action="store_true",
                     help="rank by latency/fps only; use when mAP wasn't measured")
+    ap.add_argument("--exclude", default="",
+                    help="comma-separated recipe names to drop from the ranking "
+                         "(e.g. parked experiments awaiting training code)")
     args = ap.parse_args()
 
-    results = load_results(Path(args.results_dir))
+    exclude_set = {n.strip() for n in args.exclude.split(",") if n.strip()}
+    results = load_results(Path(args.results_dir), exclude=exclude_set)
     if not results:
         print(f"no results found in {args.results_dir}", file=sys.stderr)
         return 1

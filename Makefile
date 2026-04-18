@@ -9,8 +9,14 @@ REPORT := report.md
 
 # Re-run a single recipe:  make recipe-11
 # Re-run report only:      make report
-all: recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 recipe-07 \
-     recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 report
+#
+# recipe-07 (trt_int8_sparsity) and recipe-11 (modelopt_int8_sparsity) are
+# intentionally excluded from `make all`. Post-training 2:4 sparsity collapses
+# mAP on nano YOLO without sparsity-aware training; both will come back once
+# the training pipeline lands. The targets below still exist so you can run
+# them manually (e.g. `make recipe-11`).
+all: recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 \
+     recipe-08 recipe-09 recipe-10 recipe-12 report
 
 env:
 	$(PYTHON) scripts/env_lock.py --out $(RESULTS_DIR)/_env.json
@@ -51,8 +57,12 @@ recipe-11:
 recipe-12:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/12_modelopt_int8_mixed.yaml --out $(RESULTS_DIR)/12_modelopt_int8_mixed.json
 
+# Sparsity recipes are parked until training code lands; their JSON files stay
+# on disk for history but the report drops them from the ranking via --exclude.
+PARKED := trt_int8_sparsity,modelopt_int8_sparsity
+
 report:
-	$(PYTHON) scripts/recommend.py --results-dir $(RESULTS_DIR) --out $(REPORT)
+	$(PYTHON) scripts/recommend.py --results-dir $(RESULTS_DIR) --out $(REPORT) --exclude "$(PARKED)"
 
 clean:
 	rm -rf $(RESULTS_DIR)/*.json $(REPORT) *.engine *.onnx build/ dist/ *.egg-info/
