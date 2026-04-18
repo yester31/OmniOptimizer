@@ -34,8 +34,16 @@ trt = [
     "tensorrt>=10.0",
     "polygraphy>=0.49",
 ]
+# Wave 3 INT8 backends. ort_quant piggybacks on the `onnx` group's
+# onnxruntime install. neural-compressor 2.x is pinned; 3.x replaces
+# PostTrainingQuantConfig with per-algorithm classes. setuptools<81 is
+# required on Python 3.13 because INC 2.x still imports pkg_resources.
+inc = [
+    "neural-compressor>=2.5,<3.0",
+    "setuptools<81",
+]
 all = [
-    "omnioptimizer[torch,onnx,trt]",
+    "omnioptimizer[torch,onnx,trt,inc]",
 ]
 
 [project.scripts]

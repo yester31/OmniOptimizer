@@ -7,6 +7,8 @@ REPORT := report.md
         recipe-00 recipe-00-tf32 \
         recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 recipe-07 \
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
+        recipe-13 recipe-14 recipe-15 recipe-16 \
+        recipe-17 recipe-18 recipe-19 \
         diagnose-recipe-%
 
 # Re-run a single recipe:  make recipe-11
@@ -19,7 +21,9 @@ REPORT := report.md
 # them manually (e.g. `make recipe-11`).
 all: recipe-00 recipe-00-tf32 \
      recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 \
-     recipe-08 recipe-09 recipe-10 recipe-12 report
+     recipe-08 recipe-09 recipe-10 recipe-12 \
+     recipe-13 recipe-14 recipe-15 recipe-16 \
+     recipe-17 recipe-18 report
 
 env:
 	$(PYTHON) scripts/env_lock.py --out $(RESULTS_DIR)/_env.json
@@ -66,9 +70,30 @@ recipe-11:
 recipe-12:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/12_modelopt_int8_mixed.yaml --out $(RESULTS_DIR)/12_modelopt_int8_mixed.json
 
-# Sparsity recipes are parked until training code lands; their JSON files stay
-# on disk for history but the report drops them from the ranking via --exclude.
-PARKED := trt_int8_sparsity,modelopt_int8_sparsity
+recipe-13:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/13_ort_int8_minmax.yaml --out $(RESULTS_DIR)/13_ort_int8_minmax.json
+
+recipe-14:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/14_ort_int8_entropy.yaml --out $(RESULTS_DIR)/14_ort_int8_entropy.json
+
+recipe-15:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/15_ort_int8_percentile.yaml --out $(RESULTS_DIR)/15_ort_int8_percentile.json
+
+recipe-16:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/16_ort_int8_distribution.yaml --out $(RESULTS_DIR)/16_ort_int8_distribution.json
+
+recipe-17:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/17_inc_int8_ptq.yaml --out $(RESULTS_DIR)/17_inc_int8_ptq.json
+
+recipe-18:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/18_inc_int8_smoothquant.yaml --out $(RESULTS_DIR)/18_inc_int8_smoothquant.json
+
+recipe-19:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/19_inc_int8_qat.yaml --out $(RESULTS_DIR)/19_inc_int8_qat.json
+
+# Parked recipes keep their JSON on disk for history but are dropped from the
+# ranking. #7/#11 need sparsity-aware training; #19 needs a QAT training loop.
+PARKED := trt_int8_sparsity,modelopt_int8_sparsity,inc_int8_qat
 
 report:
 	$(PYTHON) scripts/recommend.py --results-dir $(RESULTS_DIR) --out $(REPORT) --exclude "$(PARKED)"
