@@ -21,7 +21,7 @@ import random
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -220,6 +220,17 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     rejects (or silently falls back), so we force symmetry via ``extra_options``
     — this matches what modelopt does internally.
     """
+    # Validate calibrator BEFORE importing onnxruntime so a bad recipe fails
+    # with a clear ValueError even in environments without onnxruntime
+    # installed (tests, minimal dev envs).
+    _ORT_CALIBRATORS = ("minmax", "entropy", "percentile", "distribution")
+    calibrator = (recipe.technique.calibrator or "minmax").lower()
+    if calibrator not in _ORT_CALIBRATORS:
+        raise ValueError(
+            f"ort_quant backend supports calibrator in {list(_ORT_CALIBRATORS)}, "
+            f"got {calibrator!r}"
+        )
+
     try:
         from onnxruntime.quantization import (
             CalibrationDataReader,
@@ -239,12 +250,6 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         "percentile": CalibrationMethod.Percentile,
         "distribution": CalibrationMethod.Distribution,
     }
-    calibrator = (recipe.technique.calibrator or "minmax").lower()
-    if calibrator not in method_map:
-        raise ValueError(
-            f"ort_quant backend supports calibrator in {sorted(method_map)}, "
-            f"got {calibrator!r}"
-        )
 
     requested_samples = int(recipe.technique.calibration_samples or 512)
     # Histogram-based ORT calibrators (entropy / percentile / distribution)
@@ -371,329 +376,13 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     return cached
 
 
-def _prepare_inc_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
-                      dynamic: bool = True) -> Path:
-    """Quantize via Intel Neural Compressor (``neural_compressor.quantization.fit``).
-
-    Supports two calibrator keys:
-      - ``minmax``      — standard static PTQ, MinMax-based activation scales.
-      - ``smoothquant`` — activation outlier migration into weight scales
-                         (α=0.5). Expected to help YOLO necks where Concat+Conv
-                         activation ranges blow up.
-
-    TRT-friendly recipe overrides enabled regardless of calibrator:
-      - ``add_qdq_pair_to_weight=True``     — TRT requires weight QDQ.
-      - ``dedicated_qdq_pair=True``         — avoids shared QDQ across branches.
-      - ``optypes_to_exclude_output_quant`` — left default (empty) for now.
-
-    INC 2.x API. If a future plan bumps to INC 3.x, ``PostTrainingQuantConfig``
-    goes away in favour of per-algorithm config classes (e.g. ``SmoothQuantConfig``).
-    """
-    # Compatibility shim: onnx>=1.15 removed the ``onnx.mapping`` module that
-    # INC 2.x still reaches into (``quantizer.py::_get_quantization_params``
-    # reads ``onnx.mapping.NP_TYPE_TO_TENSOR_TYPE``). Without this shim, fit()
-    # fails mid-quantization with AttributeError and returns None via the
-    # outer "tuning exhausted" fallback, making the real cause invisible.
-    import numpy as np
-    import onnx as _onnx
-
-    if not hasattr(_onnx, "mapping"):
-        class _MappingShim:
-            NP_TYPE_TO_TENSOR_TYPE = {
-                np.dtype(np.float32): _onnx.TensorProto.FLOAT,
-                np.dtype(np.float16): _onnx.TensorProto.FLOAT16,
-                np.dtype(np.float64): _onnx.TensorProto.DOUBLE,
-                np.dtype(np.int8): _onnx.TensorProto.INT8,
-                np.dtype(np.uint8): _onnx.TensorProto.UINT8,
-                np.dtype(np.int16): _onnx.TensorProto.INT16,
-                np.dtype(np.uint16): _onnx.TensorProto.UINT16,
-                np.dtype(np.int32): _onnx.TensorProto.INT32,
-                np.dtype(np.int64): _onnx.TensorProto.INT64,
-                np.dtype(np.bool_): _onnx.TensorProto.BOOL,
-            }
-            TENSOR_TYPE_TO_NP_TYPE = {
-                v: k for k, v in NP_TYPE_TO_TENSOR_TYPE.items()
-            }
-
-        _onnx.mapping = _MappingShim  # type: ignore[attr-defined]
-
-    try:
-        # INC 2.x still imports pkg_resources internally. On Python 3.13
-        # this requires setuptools<81. Installation gotcha, not an API change.
-        from neural_compressor.config import PostTrainingQuantConfig
-        from neural_compressor.quantization import fit as inc_fit
-    except ImportError as e:
-        raise RuntimeError(
-            "neural-compressor 2.x not installed. Install with: "
-            "pip install 'neural-compressor>=2.5,<3.0' 'setuptools<81'"
-        ) from e
-
-    calibrator = (recipe.technique.calibrator or "minmax").lower()
-    if calibrator not in ("minmax", "smoothquant"):
-        raise ValueError(
-            f"neural_compressor backend supports calibrator in "
-            f"['minmax','smoothquant'], got {calibrator!r}"
-        )
-
-    n_samples = int(recipe.technique.calibration_samples or 512)
-    seed = int(recipe.technique.calibration_seed or 42)
-    bs_tag = "dyn" if dynamic else "bs1"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cached = cache_dir / (
-        f"{Path(recipe.model.weights).stem}_{imgsz}_inc_{calibrator}_"
-        f"{n_samples}_s{seed}_{bs_tag}.qdq.onnx"
-    )
-    if cached.exists():
-        print(f"[info] neural_compressor cache hit: {cached.name}", file=sys.stderr)
-        return cached
-
-    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
-                              cache_dir=cache_dir, dynamic=dynamic)
-    val_yaml = os.environ.get("OMNI_COCO_YAML")
-    calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
-
-    import onnx
-
-    model_proto = onnx.load(str(clean_onnx))
-    input_name = model_proto.graph.input[0].name
-    del model_proto
-
-    class _IncCalibLoader:
-        """Minimal INC-compatible dataloader: iterable of (inputs_dict, label)."""
-
-        def __init__(self, arr, name: str, batch_size: int = 1):
-            self._arr = arr
-            self._name = name
-            self.batch_size = batch_size
-
-        def __iter__(self):
-            for x in self._arr:
-                if x.ndim == 3:
-                    x = x[None, ...]
-                yield ({self._name: x}, None)
-
-        def __len__(self):
-            return len(self._arr)
-
-    recipes = {
-        "add_qdq_pair_to_weight": True,
-        "dedicated_qdq_pair": True,
-    }
-    if calibrator == "smoothquant":
-        recipes["smooth_quant"] = True
-        recipes["smooth_quant_args"] = {"alpha": 0.5}
-
-    # Force symmetric activation + weight quantization across all op types.
-    # TRT rejects non-zero zero_point in QDQ nodes; INC defaults to
-    # asymmetric activation which produces zero_point != 0 and trips the
-    # importer check "Non-zero zero point is not supported".
-    sym_op_dict = {
-        "Conv": {
-            "activation": {"dtype": ["int8"], "scheme": ["sym"]},
-            "weight": {"dtype": ["int8"], "scheme": ["sym"]},
-        },
-        "MatMul": {
-            "activation": {"dtype": ["int8"], "scheme": ["sym"]},
-            "weight": {"dtype": ["int8"], "scheme": ["sym"]},
-        },
-        "Gemm": {
-            "activation": {"dtype": ["int8"], "scheme": ["sym"]},
-            "weight": {"dtype": ["int8"], "scheme": ["sym"]},
-        },
-    }
-
-    conf = PostTrainingQuantConfig(
-        approach="static",
-        backend="default",
-        # quant_format='QDQ' forces pure QuantizeLinear/DequantizeLinear nodes
-        # in the ai.onnx namespace. INC's default mixes in com.microsoft
-        # operators like QLinearSigmoid, which TRT's ONNX importer rejects
-        # (no plugin registered). QDQ is TRT's native language.
-        quant_format="QDQ",
-        op_type_dict=sym_op_dict,
-        recipes=recipes,
-    )
-    loader = _IncCalibLoader(calib_arr, input_name, batch_size=1)
-    print(
-        f"[info] neural_compressor.fit: method={calibrator}, samples={n_samples}, "
-        f"onnx={clean_onnx.name}",
-        file=sys.stderr,
-    )
-    q_model = inc_fit(model=str(clean_onnx), conf=conf, calib_dataloader=loader)
-    if q_model is None:
-        raise RuntimeError(
-            "neural_compressor.fit returned None — tuning strategy failed to "
-            "find a quantized config meeting the (implicit) accuracy goal. "
-            "Check upstream logs for the real failure (often an onnx API "
-            "compatibility issue in INC 2.x)."
-        )
-    # INC 2.x ``save(path)`` writes the QDQ ONNX directly to ``path``. No
-    # directory scaffolding needed; on Windows passing a dir path triggers
-    # PermissionError because onnx.save opens it as a file for writing.
-    q_model.save(str(cached))
-    if not cached.exists():
-        raise RuntimeError(
-            f"neural_compressor.save did not produce {cached}"
-        )
-    _strip_int32_bias_dq(cached)
-    _force_symmetric_zero_points(cached)
-    print(f"[info] neural_compressor wrote QDQ onnx: {cached}", file=sys.stderr)
-    return cached
-
-
-def _force_symmetric_zero_points(onnx_path: Path) -> None:
-    """Zero out every zero_point initializer in Q/DQ nodes (in-place).
-
-    TRT's ONNX importer rejects non-zero zero_point with
-        "shiftIsAllZeros(zeroPoint): Non-zero zero point is not supported"
-    INC 2.x's MinMax calibration produces asymmetric ranges on activations
-    whose distribution is skewed (ReLU output, softmax, etc.), so even with
-    op_type_dict requesting scheme='sym' some QDQ output nodes end up with
-    zp != 0. Clamping here is a known accuracy tradeoff but necessary for
-    TRT consumption. Symmetric INT8 has zp=0 by definition.
-    """
-    import onnx as _onnx
-    import numpy as np
-    from onnx import numpy_helper as _np_helper
-
-    model_proto = _onnx.load(str(onnx_path))
-    graph = model_proto.graph
-    initializers = {init.name: init for init in graph.initializer}
-
-    zp_names: set[str] = set()
-    for node in graph.node:
-        if node.op_type not in ("QuantizeLinear", "DequantizeLinear"):
-            continue
-        # Q/DQ signature: input 2 is optional zero_point.
-        if len(node.input) >= 3 and node.input[2]:
-            zp_names.add(node.input[2])
-
-    changed = 0
-    for zp_name in zp_names:
-        init = initializers.get(zp_name)
-        if init is None:
-            continue
-        arr = _np_helper.to_array(init)
-        if np.any(arr != 0):
-            new_arr = np.zeros_like(arr)
-            new_init = _np_helper.from_array(new_arr, name=zp_name)
-            # Replace in place by name.
-            for i, existing in enumerate(graph.initializer):
-                if existing.name == zp_name:
-                    graph.initializer[i].CopyFrom(new_init)
-                    break
-            changed += 1
-
-    if changed:
-        _onnx.save(model_proto, str(onnx_path))
-        print(
-            f"[info] zeroed {changed}/{len(zp_names)} asymmetric zero_points in {onnx_path.name}",
-            file=sys.stderr,
-        )
-
-
-def _strip_int32_bias_dq(onnx_path: Path) -> None:
-    """Remove INT32 DequantizeLinear chains feeding Conv.bias in-place.
-
-    INC 2.x emits Conv with a quantized INT32 bias initializer + DQ node.
-    TRT's DequantizeLayer rejects INT32 input with
-        "only activation datatypes allowed as input to this layer"
-    TRT computes the real INT32 bias internally from
-        activation_scale x weight_scale
-    so the QDQ graph should leave the bias as a plain FP32 initializer.
-    We walk the graph, find DQ nodes whose input is INT32, and rewrite the
-    consumer to read the corresponding dequantized FP32 initializer instead.
-    """
-    import onnx as _onnx
-    from onnx import numpy_helper as _np_helper
-
-    model_proto = _onnx.load(str(onnx_path))
-    graph = model_proto.graph
-    initializers = {init.name: init for init in graph.initializer}
-
-    # First: collect tensors used as Conv input index 2 (bias slot).
-    conv_bias_tensors: set[str] = set()
-    for node in graph.node:
-        if node.op_type != "Conv":
-            continue
-        if len(node.input) >= 3:
-            conv_bias_tensors.add(node.input[2])
-
-    bias_dq_nodes = []
-    for node in graph.node:
-        if node.op_type != "DequantizeLinear":
-            continue
-        if not node.input:
-            continue
-        # Only strip DQ nodes that produce a Conv.bias. INC also emits DQ on
-        # attention-path INT32 constants (position indices, etc.) whose
-        # removal breaks downstream Concat/Gather topology.
-        if not node.output or node.output[0] not in conv_bias_tensors:
-            continue
-        x_name = node.input[0]
-        x_init = initializers.get(x_name)
-        if x_init is None:
-            continue
-        if x_init.data_type != _onnx.TensorProto.INT32:
-            continue
-        bias_dq_nodes.append(node)
-
-    if not bias_dq_nodes:
-        return
-
-    # For each such DQ, replace its output with a new FP32 initializer carrying
-    # the dequantized values: fp32 = int32 * scale.
-    new_initializers: list = []
-    output_remap: dict[str, str] = {}
-    for dq in bias_dq_nodes:
-        x_name, s_name = dq.input[0], dq.input[1]
-        x_init = initializers[x_name]
-        s_init = initializers.get(s_name)
-        if s_init is None:
-            continue
-        x_arr = _np_helper.to_array(x_init).astype("float32")
-        s_arr = _np_helper.to_array(s_init).astype("float32")
-        if s_arr.ndim == 0:
-            bias_fp32 = x_arr * s_arr
-        else:
-            # per-channel scale; bias is rank-1 matching axis 0 of weight.
-            bias_fp32 = x_arr * s_arr.reshape([-1] + [1] * (x_arr.ndim - 1))
-            bias_fp32 = bias_fp32.reshape(x_arr.shape)
-        new_name = dq.output[0]  # keep the DQ's output name so consumers match
-        new_init = _np_helper.from_array(bias_fp32, name=new_name)
-        new_initializers.append(new_init)
-        output_remap[dq.output[0]] = new_name  # identity here — consumer
-                                               # nodes already reference new_name
-
-    # Remove the old INT32 bias initializers + DQ nodes.
-    old_int32_names = {dq.input[0] for dq in bias_dq_nodes}
-    old_dq_ids = {id(dq) for dq in bias_dq_nodes}
-
-    new_nodes = [n for n in graph.node if id(n) not in old_dq_ids]
-    del graph.node[:]
-    graph.node.extend(new_nodes)
-
-    kept_initializers = [
-        init for init in graph.initializer if init.name not in old_int32_names
-    ]
-    del graph.initializer[:]
-    graph.initializer.extend(kept_initializers + new_initializers)
-
-    _onnx.save(model_proto, str(onnx_path))
-    print(
-        f"[info] stripped {len(bias_dq_nodes)} INT32 bias-DQ chains from {onnx_path.name}",
-        file=sys.stderr,
-    )
-
-
 # Short tags appear in engine cache filenames. Long ``technique.source`` names
-# (e.g. ``neural_compressor``) push paths past Windows' 260-char MAX_PATH when
-# combined with the imgsz/calibrator/bs/version suffixes already in the tag.
+# push paths past Windows' 260-char MAX_PATH when combined with the
+# imgsz/calibrator/bs/version suffixes already in the tag.
 _SOURCE_TAG = {
     "trt_builtin": "",
     "modelopt": "_modelopt",
     "ort_quant": "_ort",
-    "neural_compressor": "_inc",
 }
 
 
@@ -712,7 +401,7 @@ def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed
     if val_yaml and Path(val_yaml).exists():
         import cv2
 
-        paths = _resolve_val_image_paths(Path(val_yaml))
+        paths = _resolve_val_image_paths(val_yaml)
         rng = random.Random(seed)
         rng.shuffle(paths)
         paths = paths[:n_samples]
@@ -761,8 +450,6 @@ def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         return _prepare_modelopt_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     if source == "ort_quant":
         return _prepare_ort_quant_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
-    if source == "neural_compressor":
-        return _prepare_inc_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     raise ValueError(f"unknown technique.source: {source!r}")
 
 
@@ -1131,11 +818,13 @@ def _make_trt_forward(engine_path: Path, batch_size: int, imgsz: int):  # pragma
         graph = None
 
     if graph is not None:
-        def fwd(_graph=graph, _stream=stream):
-            _graph.replay()
-            _stream.synchronize()
+        _graph_ref = graph
+
+        def fwd() -> None:
+            _graph_ref.replay()
+            stream.synchronize()
     else:
-        def fwd():
+        def fwd() -> None:
             with torch.cuda.stream(stream):
                 context.execute_async_v3(stream.cuda_stream)
             stream.synchronize()

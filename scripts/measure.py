@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import gc
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar
+
+_T = TypeVar("_T")
 
 import numpy as np
 
@@ -236,7 +238,7 @@ def measure_latency(
     return stats
 
 
-def measure_cold_start(load_fn: Callable[[], object]) -> tuple[object, float]:
+def measure_cold_start(load_fn: Callable[[], _T]) -> tuple[_T, float]:
     """Time a cold-start: delete caches, call ``load_fn``, measure wall-clock.
 
     Returns (loaded_object, cold_start_ms).

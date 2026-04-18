@@ -28,7 +28,7 @@ class TechniqueSpec(BaseModel):
     # v1.1+ plans to add "modelopt" (nvidia-modelopt: torch-level quantization
     # + QDQ-ONNX export) and possibly "ort_quant" for ONNX Runtime's quantizer.
     source: Literal[
-        "trt_builtin", "modelopt", "ort_quant", "neural_compressor"
+        "trt_builtin", "modelopt", "ort_quant"
     ] = "trt_builtin"
     calibrator: Optional[str] = None
     calibration_samples: Optional[int] = None
@@ -42,12 +42,6 @@ class TechniqueSpec(BaseModel):
     # v1.2: ONNX node names to leave at FP16 during modelopt.onnx quantize.
     # Protects sensitivity-critical layers (stem Conv, detect head branches).
     nodes_to_exclude: Optional[list[str]] = None
-    # v1.3 (Wave 3): QAT-only fields. Recipe #19 (inc_int8_qat) is PARKED —
-    # declared in schema so the YAML parses and the recipe survives `make all`
-    # exclusion, but no runner consumes these yet. Activated when a training
-    # pipeline lands alongside sparsity-aware training.
-    qat_epochs: Optional[int] = None
-    qat_lr: Optional[float] = None
 
 
 class HardwareSpec(BaseModel):

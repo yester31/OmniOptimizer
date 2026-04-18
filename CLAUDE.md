@@ -9,9 +9,10 @@ code in this repository. Keep it short; detail lives in `docs/`.
 model + target GPU + constraints (max mAP drop, min fps); it runs a bank of
 (runtime × technique) recipes end-to-end and recommends the winner.
 
-Current scope: YOLO26n, one NVIDIA GPU, 21 recipes across 4 INT8 backends
-(`trt_builtin`, `modelopt`, `ort_quant`, `neural_compressor`) plus FP32 / TF32 /
-FP16 variants. Full scope + architecture + commands in
+Current scope: YOLO26n, one NVIDIA GPU, 18 recipes across 3 INT8 backends
+(`trt_builtin`, `modelopt`, `ort_quant`) plus FP32 / TF32 / FP16 variants.
+Intel Neural Compressor was evaluated (Wave 3) and removed — see the audit
+doc below for the incompatibility matrix. Full scope + architecture + commands in
 [`docs/architecture.md`](docs/architecture.md). Latest audit:
 [`docs/improvements/2026-04-18-trt-modelopt-audit.md`](docs/improvements/2026-04-18-trt-modelopt-audit.md).
 Latest plan: [`docs/plans/2026-04-18-wave3-ort-inc.md`](docs/plans/2026-04-18-wave3-ort-inc.md).
