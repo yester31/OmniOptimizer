@@ -514,7 +514,16 @@ nano 모델에선 **1–4%** 가 현실적. 또한 TRT 10에서 **TF32는 Ampere
 
 ### 누락 발견 항목 (추가)
 
-#### 신규 N1. Calibration 전처리 RGB/BGR 확인 (잠재 mAP 훼손)
+#### 신규 N1. Calibration 전처리 RGB/BGR 확인 (**검증 완료: 일치**)
+
+**실측 (2026-04-18):** COCO val image 한 장을 `_letterbox`와 ultralytics
+`LetterBox` + BGR→RGB + /255 양쪽에 돌려 비교 → `np.allclose=True`,
+`max_abs_diff=0.0`. 즉 현 calibration 전처리는 ultralytics ONNX export가 기대하는
+입력과 정확히 일치. **수정 불필요, 우려 해소.**
+
+(원 N1 분석은 아래 유지.)
+
+
 
 `_build_calib_numpy` → `_letterbox`는:
 ```python

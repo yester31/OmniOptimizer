@@ -208,7 +208,14 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
 
 def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed: int):
     """Return (N,3,H,W) float32 numpy array for modelopt.onnx calibration.
-    Falls back to random-normal when no COCO yaml is mounted."""
+
+    Default behavior: REAL images from COCO val (or whatever ``val_yaml``
+    points at). If the yaml is missing or produces no usable images,
+    raises ``RuntimeError`` unless the ``OMNI_ALLOW_RANDOM_CALIB`` env
+    var is set to ``1`` — the random-normal fallback silently tanks mAP
+    (double-digit %p on detection), so making it opt-in prevents
+    debugging wild-goose chases like the Phase 3 sparsify diagnosis.
+    """
     import numpy as np
 
     if val_yaml and Path(val_yaml).exists():
@@ -227,6 +234,17 @@ def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed
         if buf:
             return np.stack(buf, axis=0).astype(np.float32)
 
+    if os.environ.get("OMNI_ALLOW_RANDOM_CALIB") != "1":
+        raise RuntimeError(
+            "Calibration data unavailable: OMNI_COCO_YAML is not set or the "
+            "referenced dataset produced no readable images. Random-normal "
+            "calibration silently drops INT8 mAP by double digits. Set "
+            "OMNI_COCO_YAML to a valid ultralytics dataset yaml (with a val "
+            "split pointing at real images), or pass OMNI_ALLOW_RANDOM_CALIB=1 "
+            "to explicitly opt in to the random-normal fallback."
+        )
+    print("[warn] OMNI_ALLOW_RANDOM_CALIB=1: using random-normal calibration "
+          "(INT8 mAP will be degraded)", file=sys.stderr)
     rng_np = np.random.default_rng(seed)
     return rng_np.standard_normal((n_samples, 3, imgsz, imgsz), dtype=np.float32)
 
@@ -400,6 +418,13 @@ def _make_random_calibrator(shape, n_samples: int, cache_path: Path, seed: int):
     return _TorchCalibrator()
 
 
+def _timing_cache_path() -> Path:
+    """Shared layer-timing cache across recipes. Kept per (TRT, CUDA)
+    by relying on TRT's own ignore_mismatch=False — if the version
+    changes we just get a fresh cache, not a corrupted reuse."""
+    return Path("results/_trt_timing.cache")
+
+
 def _build_engine(
     onnx_path: Path,
     engine_path: Path,
@@ -411,7 +436,15 @@ def _build_engine(
     calib_seed: int,
     quant_preapplied: bool = False,
 ) -> tuple[Optional[Path], Optional[str]]:
-    """Build a TensorRT engine. Returns (engine_path, note-or-None)."""
+    """Build a TensorRT engine. Returns (engine_path, note-or-None).
+
+    Shares a layer-timing cache across recipes — first build warms it,
+    subsequent builds reuse layer-tactic timings so only truly new layers
+    are re-profiled. Per the TensorRT performance guide, the cache is
+    keyed on device / CUDA / TRT version / builder flags, so reusing it
+    across recipes with different dtype or flags is safe (TRT rejects
+    mismatched entries rather than silently using wrong timings).
+    """
     try:
         import tensorrt as trt  # noqa: F401
     except Exception as e:
@@ -435,6 +468,15 @@ def _build_engine(
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+
+    # Load (or create) the shared timing cache before any flags that
+    # affect layer selection — TRT consults the cache during tactic
+    # timing, which happens later in build_serialized_network.
+    cache_path = _timing_cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_bytes = cache_path.read_bytes() if cache_path.exists() else b""
+    timing_cache = config.create_timing_cache(cache_bytes)
+    config.set_timing_cache(timing_cache, ignore_mismatch=False)
 
     if dtype == "fp16":
         config.set_flag(trt.BuilderFlag.FP16)
@@ -464,15 +506,23 @@ def _build_engine(
                     )
                     print(f"[info] INT8 calib: coco images from {val_yaml}", file=sys.stderr)
                 except Exception as e:
-                    print(f"[warn] coco calibrator failed ({e}); falling back to random", file=sys.stderr)
+                    print(f"[warn] coco calibrator failed ({e})", file=sys.stderr)
             if calibrator is None:
+                if os.environ.get("OMNI_ALLOW_RANDOM_CALIB") != "1":
+                    return None, (
+                        "INT8 calibration data unavailable: set OMNI_COCO_YAML to a "
+                        "real ultralytics dataset yaml, or pass OMNI_ALLOW_RANDOM_CALIB=1 "
+                        "to explicitly opt in to the random-normal fallback "
+                        "(known to drop mAP by double digits)."
+                    )
                 calibrator = _make_random_calibrator(
                     shape=(1, 3, imgsz, imgsz),
                     n_samples=calib_samples,
                     cache_path=cache_file,
                     seed=calib_seed,
                 )
-                print("[info] INT8 calib: random-normal fallback", file=sys.stderr)
+                print("[warn] OMNI_ALLOW_RANDOM_CALIB=1: random-normal INT8 calibration",
+                      file=sys.stderr)
             config.int8_calibrator = calibrator
 
     if sparsity == "2:4":
@@ -491,6 +541,16 @@ def _build_engine(
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
         return None, "engine build returned None"
+
+    # Persist the timing cache so the next engine build benefits. TRT
+    # updates the cache in place during tactic profiling; we just
+    # serialize whatever is in the config's cache slot back to disk.
+    try:
+        updated_cache = config.get_timing_cache()
+        if updated_cache is not None:
+            cache_path.write_bytes(bytes(updated_cache.serialize()))
+    except Exception as e:
+        print(f"[warn] timing cache write failed: {e}", file=sys.stderr)
 
     engine_path.parent.mkdir(parents=True, exist_ok=True)
     engine_path.write_bytes(bytes(serialized))
@@ -541,15 +601,48 @@ def _make_trt_forward(engine_path: Path, batch_size: int, imgsz: int):  # pragma
 
     stream = torch.cuda.Stream()
 
-    def fwd():
+    # Attempt CUDA graph capture to amortise Python + TRT per-call launch
+    # overhead (H1 in docs/improvements/2026-04-18-trt-modelopt-audit.md).
+    # IO tensor addresses were already registered via set_tensor_address above
+    # and must stay stable across replays — io_tensors is kept alive on the
+    # returned closure. On capture failure (e.g. a kernel with data-dependent
+    # control flow sneaks in) we fall back to direct execute_async_v3.
+    graph: Optional["torch.cuda.CUDAGraph"] = None
+    try:
+        # Prime internal state once before capture, as recommended by the TRT
+        # CUDA graphs guide.
         with torch.cuda.stream(stream):
             context.execute_async_v3(stream.cuda_stream)
         stream.synchronize()
+
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g, stream=stream):
+            context.execute_async_v3(stream.cuda_stream)
+        graph = g
+        print("[info] CUDA graph captured", file=sys.stderr)
+    except Exception as e:  # pragma: no cover - runtime-only CUDA path
+        print(
+            f"[warn] CUDA graph capture failed ({e}); falling back to "
+            "direct execute_async_v3",
+            file=sys.stderr,
+        )
+        graph = None
+
+    if graph is not None:
+        def fwd(_graph=graph, _stream=stream):
+            _graph.replay()
+            _stream.synchronize()
+    else:
+        def fwd():
+            with torch.cuda.stream(stream):
+                context.execute_async_v3(stream.cuda_stream)
+            stream.synchronize()
 
     # Pin long-lived references so Python doesn't free them between calls.
     fwd._io = io_tensors  # type: ignore[attr-defined]
     fwd._context = context  # type: ignore[attr-defined]
     fwd._stream = stream  # type: ignore[attr-defined]
+    fwd._graph = graph  # type: ignore[attr-defined]
     return fwd, engine
 
 
@@ -567,6 +660,23 @@ def run(recipe_path: str, out_path: str) -> int:
     engine_cache = Path("results/_engines")
     engine_cache.mkdir(parents=True, exist_ok=True)
 
+    # Engine plan files are not portable across TRT / CUDA versions.
+    # Tagging the filename with trt<major>.<minor>_cuda<major>.<minor>
+    # keeps old plans out of new runs after a library upgrade, instead of
+    # silently re-using an incompatible engine. Falls back to "trtX_cudaY"
+    # if the version string is not in an expected form.
+    def _version_tag() -> str:
+        def _mm(s: str, prefix: str) -> str:
+            if not s:
+                return f"{prefix}?"
+            parts = s.split(".")
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                return f"{prefix}{parts[0]}.{parts[1]}"
+            return f"{prefix}{parts[0]}"
+        return f"{_mm(str(env.get('tensorrt')), 'trt')}_{_mm(str(env.get('cuda')), 'cuda')}"
+
+    version_tag = _version_tag()
+
     dtype = recipe.runtime.dtype
     sparsity = recipe.runtime.sparsity
 
@@ -581,7 +691,7 @@ def run(recipe_path: str, out_path: str) -> int:
     source_suffix = "" if source == "trt_builtin" else f"_{source}"
     for bs in recipe.measurement.batch_sizes:
         onnx_path, quant_preapplied = _prepare_onnx(recipe, imgsz, onnx_cache, bs)
-        engine_tag = f"{onnx_path.stem}_{dtype}{'_sparse' if sparsity else ''}{source_suffix}_bs{bs}.engine"
+        engine_tag = f"{onnx_path.stem}_{dtype}{'_sparse' if sparsity else ''}{source_suffix}_bs{bs}_{version_tag}.engine"
         engine_path = engine_cache / engine_tag
 
         built, err = _build_engine(
@@ -660,7 +770,7 @@ def run(recipe_path: str, out_path: str) -> int:
             # ultralytics + the engine's optimization profile both expect).
             eng_for_val = bs1_engine
             if eng_for_val is None or not eng_for_val.exists():
-                matches = sorted(engine_cache.glob(f"*{dtype}{source_suffix}_bs1.engine"))
+                matches = sorted(engine_cache.glob(f"*{dtype}{source_suffix}_bs1_{version_tag}.engine"))
                 if not matches:
                     raise RuntimeError("no bs=1 engine available for mAP eval")
                 eng_for_val = matches[-1]
