@@ -723,12 +723,22 @@ def _resolve_val_image_paths(yaml_path: str) -> list[str]:
         spec = yaml_mod.safe_load(f)
     root = Path(spec["path"])
     val_rel = spec["val"]
-    val_txt = (root / val_rel) if not Path(val_rel).is_absolute() else Path(val_rel)
+    val_target = (root / val_rel) if not Path(val_rel).is_absolute() else Path(val_rel)
 
-    with open(val_txt, "r", encoding="utf-8") as f:
+    # ultralytics datasets commonly declare val either as (a) a .txt listing file
+    # (COCO convention) or (b) a directory of images (YOLOv5+ convention). Support
+    # both so the same calibration path works for COCO and custom datasets.
+    paths: list[str] = []
+    if val_target.is_dir():
+        exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+        for p in sorted(val_target.rglob("*")):
+            if p.suffix.lower() in exts:
+                paths.append(str(p.resolve()))
+        return paths
+
+    with open(val_target, "r", encoding="utf-8") as f:
         lines = [ln.strip() for ln in f if ln.strip()]
 
-    paths: list[str] = []
     for ln in lines:
         p = Path(ln)
         if not p.is_absolute():

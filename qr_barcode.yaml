@@ -1,0 +1,11 @@
+# Fine-tuned QR/Barcode dataset spec for OmniOptimizer.
+# data.yaml shipped with the dataset points at an out-of-date path; override here.
+path: E:/datasets/QR_BARCODE/sample_dataset_5000_refined_sampled_labelme_yolo_dataset2_bg
+train: images/train
+val: images/val
+test: images/test
+
+nc: 2
+names:
+  - barcode
+  - qrcode

@@ -140,8 +140,16 @@ class Result(BaseModel):
 
 
 def load_recipe(path: str) -> Recipe:
+    import os
     import yaml
 
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
+    # Env override so one recipe bank can evaluate multiple checkpoints
+    # (e.g., generic yolo26n.pt vs a fine-tuned best.pt). Keeps recipe files
+    # as the canonical default while letting batch runs swap weights without
+    # editing 21 YAMLs.
+    weights_override = os.environ.get("OMNI_WEIGHTS_OVERRIDE")
+    if weights_override:
+        data.setdefault("model", {})["weights"] = weights_override
     return Recipe.model_validate(data)
