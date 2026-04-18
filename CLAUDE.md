@@ -8,15 +8,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Give it a model + a target GPU + constraints (max mAP drop, min fps), and it runs
 a bank of (runtime × technique) recipes end-to-end, then recommends the best one.
 
-v1 scope (approved 2026-04-17):
+Current scope (as of Wave 3, 2026-04-18):
 
 - **Model**: YOLO26n (Ultralytics)
-- **Hardware**: one NVIDIA GPU (Ampere+ for recipe #7)
-- **Runtimes × Techniques** (7 recipes total): PyTorch eager FP32, `torch.compile`
-  FP16, ONNX Runtime on CUDA EP and TensorRT EP (FP16), native TensorRT FP16 / INT8
-  PTQ / INT8 PTQ + 2:4 Sparsity.
-- **Metrics**: p50/p95/p99 latency, fps (bs=1, 8), peak GPU mem, mAP@0.5 /
-  mAP@0.5-0.95, model size, cold-start.
+- **Hardware**: one NVIDIA GPU (Ampere+ for sparsity recipes / TF32)
+- **Runtimes × Techniques** (21 recipes): PyTorch eager FP32, `torch.compile` FP16,
+  ONNX Runtime on CUDA EP and TensorRT EP (FP16), native TensorRT FP32/TF32/FP16/INT8.
+  INT8 covers 4 backends — `trt_builtin` (native calibrator), `modelopt`
+  (NVIDIA ModelOpt ONNX-path, max/entropy/percentile/mixed-precision),
+  `ort_quant` (onnxruntime.quantization, 4 calibration methods),
+  `neural_compressor` (Intel INC PTQ + SmoothQuant). Plus 2:4 sparsity and
+  QAT recipes parked pending training pipeline.
+- **Metrics**: p50/p95/p99 latency (wall-clock + CUDA Event GPU-only), fps (bs=1, 8),
+  peak GPU mem (torch + NVML delta), mAP@0.5 / mAP@0.5-0.95, model size, cold-start.
+
+Original v1 plan approved 2026-04-17 (7 recipes). Wave 1/2 landed perf hygiene
+and modelopt/TF32; Wave 3 added ORT + INC backends. See
+`docs/improvements/2026-04-18-trt-modelopt-audit.md` for the full audit trail
+and `docs/plans/2026-04-18-wave3-ort-inc.md` for the most recent plan.
 
 Design doc (personal): `~/.gstack/projects/yester31-OmniOptimizer/yeste-main-design-20260417-093458.md`
 Approved plan: `~/.claude/plans/synchronous-skipping-hamming.md`
@@ -24,12 +33,16 @@ Approved plan: `~/.claude/plans/synchronous-skipping-hamming.md`
 ## Common commands
 
 ```bash
-# End-to-end: run all 7 recipes and emit report.md
+# End-to-end: run all active recipes and emit report.md
+# (21 defined; #7/#11/#19 parked, so make all runs 18.)
 make all
 
 # One recipe at a time
 make recipe-01    # PyTorch FP32 baseline
-make recipe-06    # TensorRT INT8 PTQ
+make recipe-06    # TensorRT INT8 PTQ (trt_builtin)
+make recipe-09    # TensorRT INT8 PTQ (modelopt, entropy)
+make recipe-15    # TensorRT INT8 PTQ (ort_quant, percentile)
+make recipe-18    # TensorRT INT8 PTQ (neural_compressor, SmoothQuant)
 ...
 
 # Re-generate the report from existing results/
