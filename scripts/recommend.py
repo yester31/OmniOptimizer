@@ -91,6 +91,10 @@ def rank(
                 "fps_bs1": fps_bs1,
                 "fps_bs8": _safe(r.throughput_fps.bs8),
                 "p50_ms": _safe(r.latency_ms.p50),
+                # CUDA Event GPU-only p50 (Wave 2 Track C). None on legacy
+                # result JSONs and on runners that don't pipe the new key
+                # through yet — rendered as "—" in the report.
+                "p50_gpu_ms": _safe(getattr(r.latency_ms, "p50_gpu", None)),
                 "map_50": map_50,
                 "map_50_95": _safe(r.accuracy.map_50_95),
                 "drop_pp": drop_pp,
@@ -118,8 +122,8 @@ def format_report(rows: list[dict], baseline: Optional[Result]) -> str:
         lines.append(f"Baseline: `{baseline.recipe}`  |  GPU: `{baseline.env.gpu}`  |  CUDA: `{baseline.env.cuda}`\n")
 
     lines.append("")
-    lines.append("| Rank | Recipe | fps(bs1) | fps(bs8) | p50 ms | mAP@0.5 | drop | mem MB | meets? |")
-    lines.append("|-----:|--------|---------:|---------:|-------:|--------:|-----:|-------:|:------:|")
+    lines.append("| Rank | Recipe | fps(bs1) | fps(bs8) | p50 ms | gpu ms | mAP@0.5 | drop | mem MB | meets? |")
+    lines.append("|-----:|--------|---------:|---------:|-------:|-------:|--------:|-----:|-------:|:------:|")
 
     def fmt(v, fmt_str="{:.2f}"):
         if v is None:
@@ -134,12 +138,13 @@ def format_report(rows: list[dict], baseline: Optional[Result]) -> str:
         if winner is None and row["meets"]:
             winner = row
         lines.append(
-            "| {rank} | `{recipe}` | {fps1} | {fps8} | {p50} | {map50} | {drop} | {mem} | {ok} |".format(
+            "| {rank} | `{recipe}` | {fps1} | {fps8} | {p50} | {gpu} | {map50} | {drop} | {mem} | {ok} |".format(
                 rank=i,
                 recipe=row["recipe"],
                 fps1=fmt(row["fps_bs1"], "{:.1f}"),
                 fps8=fmt(row["fps_bs8"], "{:.1f}"),
                 p50=fmt(row["p50_ms"], "{:.2f}"),
+                gpu=fmt(row["p50_gpu_ms"], "{:.2f}"),
                 map50=fmt(row["map_50"], "{:.3f}"),
                 drop=fmt(row["drop_pp"], "{:+.2f}%p") if row["drop_pp"] is not None else "—",
                 mem=fmt(row["peak_mem_mb"], "{:.0f}"),

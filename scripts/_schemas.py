@@ -76,9 +76,18 @@ class Recipe(BaseModel):
 
 
 class LatencyStats(BaseModel):
+    # Wall-clock (perf_counter + cuda.synchronize) percentiles — primary
+    # metric, captures end-to-end user-visible latency incl. launch overhead.
     p50: float
     p95: float
     p99: float
+    # CUDA Event based percentiles — isolates on-GPU execution time from
+    # Python / TRT enqueue overhead. Optional so historical result JSONs
+    # without these fields still load. Populated by measure_latency when
+    # CUDA + torch are available; remains None otherwise.
+    p50_gpu: Optional[float] = None
+    p95_gpu: Optional[float] = None
+    p99_gpu: Optional[float] = None
 
 
 class ThroughputStats(BaseModel):
@@ -114,6 +123,11 @@ class Result(BaseModel):
     latency_ms: LatencyStats
     throughput_fps: ThroughputStats = Field(default_factory=ThroughputStats)
     peak_gpu_mem_mb: Optional[float] = None
+    # NVML process-memory delta (baseline -> peak during measurement).
+    # Captures allocations from TRT's own allocator that torch's caching
+    # allocator misses (`peak_gpu_mem_mb` above is torch-only). Optional
+    # for backward compatibility with historical JSONs.
+    peak_gpu_mem_mb_nvml_delta: Optional[float] = None
     cold_start_ms: Optional[float] = None
     accuracy: AccuracyStats = Field(default_factory=AccuracyStats)
     meets_constraints: Optional[bool] = None

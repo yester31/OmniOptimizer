@@ -3,6 +3,18 @@
 The core pattern: run ``forward_fn`` ``warmup_iters`` times to absorb JIT /
 kernel-cache warm-up, then ``measure_iters`` times to record per-iteration
 wall-clock latency, then compute percentiles.
+
+Wall-clock (``time.perf_counter`` around ``_cuda_sync``) is the primary metric
+— it captures the end-to-end user-visible latency including Python + TRT
+launch overhead. CUDA events (``p50_gpu`` etc.) are reported as a secondary
+metric isolating on-GPU execution time, useful when debugging launch-overhead
+dominated nano models.
+
+Peak GPU memory is likewise reported twice: ``peak_gpu_mem_mb`` uses torch's
+caching allocator (misses TRT's own ``cudaMalloc`` calls), and
+``peak_gpu_mem_mb_nvml_delta`` uses NVML process-memory delta (baseline →
+peak), which captures TRT allocator bytes. Both degrade to ``None`` when
+their backing API is unavailable.
 """
 from __future__ import annotations
 
@@ -34,6 +46,12 @@ def _reset_peak_mem() -> None:
 
 
 def _read_peak_mem_mb() -> Optional[float]:
+    """Torch caching-allocator peak since last reset. None if torch/CUDA absent.
+
+    This is the "backbone" peak: correct for PyTorch/ORT-CUDA runners, an
+    underestimate for TRT runners (TRT uses its own allocator). Pair with
+    ``_read_nvml_used_bytes`` for a TRT-inclusive second source.
+    """
     try:
         import torch
 
@@ -54,6 +72,58 @@ def _read_peak_mem_mb() -> Optional[float]:
         return None
 
 
+class _NvmlDeltaProbe:
+    """Track NVML device memory baseline → peak during a measurement window.
+
+    Graceful: if pynvml is missing or nvmlInit fails, ``delta_mb()`` returns
+    ``None`` and all ``sample()`` calls are no-ops. This lets measure_latency
+    always call it unconditionally.
+    """
+
+    def __init__(self, device_index: int = 0):
+        self._ok = False
+        self._handle = None
+        self._baseline: Optional[int] = None
+        self._peak: Optional[int] = None
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            self._pynvml = pynvml
+            self._handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
+            info = pynvml.nvmlDeviceGetMemoryInfo(self._handle)
+            self._baseline = int(info.used)
+            self._peak = int(info.used)
+            self._ok = True
+        except Exception:
+            self._ok = False
+
+    def sample(self) -> None:
+        if not self._ok:
+            return
+        try:
+            info = self._pynvml.nvmlDeviceGetMemoryInfo(self._handle)
+            used = int(info.used)
+            if self._peak is None or used > self._peak:
+                self._peak = used
+        except Exception:
+            # Don't break the measurement loop on a flaky NVML call.
+            pass
+
+    def delta_mb(self) -> Optional[float]:
+        if not self._ok or self._baseline is None or self._peak is None:
+            return None
+        return max(0.0, (self._peak - self._baseline) / (1024 ** 2))
+
+    def close(self) -> None:
+        if not self._ok:
+            return
+        try:
+            self._pynvml.nvmlShutdown()
+        except Exception:
+            pass
+
+
 def percentiles(samples_ms: list[float]) -> dict:
     arr = np.asarray(samples_ms, dtype=np.float64)
     return {
@@ -63,30 +133,106 @@ def percentiles(samples_ms: list[float]) -> dict:
     }
 
 
+def _gpu_percentiles(samples_ms: list[float]) -> dict:
+    """Same percentile bins as ``percentiles`` but keyed for GPU-time fields."""
+    arr = np.asarray(samples_ms, dtype=np.float64)
+    return {
+        "p50_gpu": float(np.percentile(arr, 50)),
+        "p95_gpu": float(np.percentile(arr, 95)),
+        "p99_gpu": float(np.percentile(arr, 99)),
+    }
+
+
+def _maybe_make_cuda_events() -> Optional[tuple]:
+    """Return a (start, end) pair of torch.cuda.Event if CUDA is usable, else None.
+
+    ``enable_timing=True`` is required to query ``elapsed_time``.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        return (start, end)
+    except Exception:
+        return None
+
+
 def measure_latency(
     forward_fn: Callable[[], object],
     warmup_iters: int,
     measure_iters: int,
 ) -> dict:
-    """Run ``forward_fn`` in a tight loop and return latency percentiles (ms)."""
+    """Run ``forward_fn`` in a tight loop and return latency percentiles (ms).
+
+    Returned dict (keys; ``None`` entries are kept so callers can pass the
+    whole dict through to ``LatencyStats``/``Result`` without filtering):
+
+    - ``p50`` / ``p95`` / ``p99``: wall-clock percentiles in ms (primary)
+    - ``p50_gpu`` / ``p95_gpu`` / ``p99_gpu``: CUDA-event percentiles in ms,
+      or ``None`` when CUDA/torch is not available
+    - ``peak_gpu_mem_mb``: torch caching-allocator peak (``None`` if torch
+      absent; NVML used-bytes fallback if NVML alone is present)
+    - ``peak_gpu_mem_mb_nvml_delta``: NVML process-memory delta during the
+      measurement window (``None`` if pynvml is unavailable)
+
+    Runners that only forward the subset of keys they know about (legacy
+    behaviour) still work — the new Optional fields simply stay ``None`` in
+    the resulting ``LatencyStats`` / ``Result``.
+    """
     _reset_peak_mem()
 
-    # Warm-up
+    # Warm-up (no timing, but let the GPU / caches settle)
     for _ in range(warmup_iters):
         forward_fn()
     _cuda_sync()
 
+    # Baseline NVML snapshot taken *after* warm-up so steady-state buffers
+    # are already resident — the delta then reflects measurement-window
+    # allocations (e.g. new TRT IO tensors), not one-time runtime init.
+    nvml_probe = _NvmlDeltaProbe()
+
+    # Set up CUDA events once; if CUDA is unavailable we simply won't record
+    # per-iteration GPU time and p*_gpu stays None.
+    events = _maybe_make_cuda_events()
+
     # Measure
-    samples: list[float] = []
+    wall_samples: list[float] = []
+    gpu_samples: list[float] = []
     for _ in range(measure_iters):
         _cuda_sync()
-        t0 = time.perf_counter()
-        forward_fn()
-        _cuda_sync()
-        samples.append((time.perf_counter() - t0) * 1000.0)
+        if events is not None:
+            start_ev, end_ev = events
+            t0 = time.perf_counter()
+            start_ev.record()
+            forward_fn()
+            end_ev.record()
+            # synchronize the *event* (not the whole device) for accurate
+            # GPU time, then ensure CPU-side timing also reflects completion.
+            end_ev.synchronize()
+            gpu_samples.append(float(start_ev.elapsed_time(end_ev)))
+            _cuda_sync()
+            wall_samples.append((time.perf_counter() - t0) * 1000.0)
+        else:
+            t0 = time.perf_counter()
+            forward_fn()
+            _cuda_sync()
+            wall_samples.append((time.perf_counter() - t0) * 1000.0)
+        nvml_probe.sample()
 
-    stats = percentiles(samples)
+    stats: dict = percentiles(wall_samples)
+    # Always include GPU keys so downstream consumers can rely on the shape;
+    # value is None when CUDA events weren't available.
+    if gpu_samples:
+        stats.update(_gpu_percentiles(gpu_samples))
+    else:
+        stats.update({"p50_gpu": None, "p95_gpu": None, "p99_gpu": None})
+
     stats["peak_gpu_mem_mb"] = _read_peak_mem_mb()
+    stats["peak_gpu_mem_mb_nvml_delta"] = nvml_probe.delta_mb()
+    nvml_probe.close()
     return stats
 
 
