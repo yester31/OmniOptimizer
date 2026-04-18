@@ -585,6 +585,8 @@ def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         return _prepare_modelopt_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     if source == "ort_quant":
         return _prepare_ort_quant_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
+    if source == "brevitas":
+        return _prepare_brevitas_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     raise ValueError(f"unknown technique.source: {source!r}")
 
 
