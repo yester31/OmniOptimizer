@@ -698,3 +698,54 @@ Wave 3   │            │            │                  │ 17 AutoTune
 - **Hardware compatibility level**: 크로스 GPU 빌드는 v2+ scope (CLAUDE.md와 일치).
 - **kSTRIP_PLAN / kREFIT**: 사이즈 최적화 도구. 배포 파이프라인에서 필요 시 도입.
 - **QAT / SAT**: 학습 코드 범위 밖.
+
+---
+
+## Wave 3 results — ONNX Runtime Quantization + Intel Neural Compressor (2026-04-18)
+
+### 실험 목적
+`trt_builtin`(−7.9%p) 및 `modelopt`(−1.6~1.9%p) 외에 두 개의 INT8 백엔드를
+더 얹어 mAP-fps 공간을 넓혀본다. (1) ORT `quantize_static` (4종 calibrator),
+(2) Intel Neural Compressor 2.6 (MinMax PTQ + SmoothQuant). QAT 스펙(#19)은
+training 코드 부재로 parked.
+
+### 측정치 (RTX 3060 Laptop, YOLO26n 640×640, bs=1)
+
+| 레시피 | calibrator | mAP@0.5 | drop %p | fps(bs1) | meets 1%p? |
+|---|---|---:|---:|---:|:---:|
+| #13 ort_int8_minmax       | MinMax       | 0.494 | +5.94 | 536 | ✘ |
+| #14 ort_int8_entropy      | Entropy      | 0.501 | +5.16 | 679 | ✘ |
+| #15 ort_int8_percentile   | Percentile   | 0.528 | +2.50 | 647 | ✘ |
+| #16 ort_int8_distribution | Distribution | 0.503 | +4.97 | 644 | ✘ |
+| #17 inc_int8_ptq          | MinMax       |   —   |   —   |   — | ✘ (build fail) |
+| #18 inc_int8_smoothquant  | SmoothQuant  |   —   |   —   |   — | ✘ (build fail) |
+| (참조) #8 modelopt_int8_ptq  | max        | 0.521 | +3.19 | 400 | ✘ |
+| (참조) #9 modelopt_int8_entropy | entropy | 0.537 | +1.64 | 409 | ✘ |
+| (참조) #12 modelopt_int8_mixed | entropy+excludes | 0.537 | +1.64 | 419 | ✘ |
+
+### 해석
+
+**ORT 백엔드 — 예상 밖의 fps, 낮지만 측정 가능한 mAP**
+
+- ORT 경로는 `quantize_static` 호출 전에 `quant_pre_process` (shape inference + folding)를 강제함. 결과 ONNX가 modelopt 경로 대비 얇아져 TRT 엔진이 더 효율적 — ORT 4종의 fps(bs=1)가 modelopt보다 30~70% 높게 나옴. 가속 자체는 양자화가 아닌 pre-processing 기여.
+- **ORT percentile (#15)**은 Wave 3 최고 accuracy (drop +2.50%p). Entropy/Distribution (5%p대)보다 뚜렷이 낫고, MinMax(6%p)보다는 더 낫지만 modelopt entropy(1.64%p)에는 못 미침. 이유는 ORT percentile의 고정 99.999 threshold가 YOLO neck의 outlier 분포에 덜 robust.
+- 공통적으로 Wave 3 recipes 중 `max_map_drop_pct=1.0` 충족 없음. modelopt도 마찬가지였으나 drop이 절반 수준 — "fast 하지만 덜 정확한" ORT vs "느리지만 더 정확한" modelopt 구도가 명확.
+
+**INC 백엔드 — 본 조합에서 TRT 비호환 확정**
+
+INC 2.6 + onnx 1.17 + TRT 10 조합을 YOLO26n에 적용하면 5개의 독립적 비호환이 연쇄 발생:
+
+1. `onnx.mapping` module removed in onnx>=1.15 — INC 2.6 내부 참조 잔존
+2. INC 기본 `QOperator` 포맷이 `com.microsoft.QLinearSigmoid`를 생성 — TRT 플러그인 미등록
+3. Conv.bias를 INT32 QDQ로 폴딩 — TRT `DequantizeLayer`가 INT32 입력 거부
+4. MinMax calibration이 `op_type_dict` scheme='sym' 요청에도 불구하고 activation output QDQ에 non-zero zero_point 산출 — TRT가 asymmetric QDQ 거부
+5. SmoothQuant가 attention block의 weight shape를 바꾸지만 downstream `Reshape` 노드는 그대로 — TRT 빌드 시 `[8,2,32,400] → [8,128,20,20]` volume mismatch
+
+1~4는 `scripts/run_trt.py`에 호환 레이어를 추가해 통과 시도했으나, 5는 INC가 SmoothQuant 시 attention subgraph를 재작성할 때 필요한 쌍 대응 graph rewrite를 수행하지 않아 해결 불가. INC 내부의 SmoothQuant + ONNX backend는 LLM/CNN 공통 경로로 검증돼있지만 **ViT-style attention + reshape** 워크로드에선 아직 beta 수준. 결국 #17/#18은 runner가 build 실패로 기록하고 report에 노출만 함 (`meets_constraints=False`).
+
+### 결론 & follow-up
+
+- 즉시 추천 변경 없음. `trt_fp16`이 여전히 유일한 제약 충족 레시피로 report 1위.
+- Wave 3의 양자화 비교가 실제로 도움이 되는 것은 "더 빠른 INT8이 필요하지만 1%p drop은 이미 포기" 시나리오 — 이 때 `ort_int8_percentile` (fps 647, drop 2.5%p)이 modelopt_int8_mixed (fps 419, drop 1.6%p)를 대체할 후보.
+- INC 경로는 **본 저장소에서 deprecated** 표식. 재시도는 (a) INC 3.x가 onnx-rewrite를 attention-aware로 고친 뒤 또는 (b) PyTorch-level INC SmoothQuant → torch.onnx.export QDQ 경로(modelopt의 torch path 구조와 동일)로 재구현.
+- SmoothQuant 시도 자체는 계속 가치 있음: modelopt는 SmoothQuant를 CNN path에 공식 지원하지 않으므로, Phase 5에서 `modelopt.torch.quantization`의 fake-quant → SmoothQuant 어댑터 수기 구현을 고려.
