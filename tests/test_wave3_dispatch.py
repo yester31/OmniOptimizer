@@ -102,3 +102,27 @@ def test_ort_quant_rejects_unknown_calibrator(tmp_path):
     )
     with pytest.raises(ValueError, match="calibrator"):
         _prepare_ort_quant_onnx(recipe, 640, tmp_path, dynamic=False)
+
+
+def test_prepare_onnx_routes_to_neural_compressor(tmp_path):
+    from scripts.run_trt import _prepare_onnx
+
+    recipe = load_recipe(
+        str(_write_min_recipe(tmp_path, "neural_compressor", "minmax"))
+    )
+    with patch("scripts.run_trt._prepare_inc_onnx") as m:
+        m.return_value = tmp_path / "fake.onnx"
+        path, is_qdq = _prepare_onnx(recipe, 640, tmp_path, bs=1)
+    assert is_qdq is True
+    assert path == tmp_path / "fake.onnx"
+    m.assert_called_once()
+
+
+def test_inc_rejects_unknown_calibrator(tmp_path):
+    from scripts.run_trt import _prepare_inc_onnx
+
+    recipe = load_recipe(
+        str(_write_min_recipe(tmp_path, "neural_compressor", "bogus_method"))
+    )
+    with pytest.raises(ValueError, match="calibrator"):
+        _prepare_inc_onnx(recipe, 640, tmp_path, dynamic=False)

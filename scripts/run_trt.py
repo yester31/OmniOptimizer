@@ -312,6 +312,125 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     return cached
 
 
+def _prepare_inc_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
+                      dynamic: bool = True) -> Path:
+    """Quantize via Intel Neural Compressor (``neural_compressor.quantization.fit``).
+
+    Supports two calibrator keys:
+      - ``minmax``      — standard static PTQ, MinMax-based activation scales.
+      - ``smoothquant`` — activation outlier migration into weight scales
+                         (α=0.5). Expected to help YOLO necks where Concat+Conv
+                         activation ranges blow up.
+
+    TRT-friendly recipe overrides enabled regardless of calibrator:
+      - ``add_qdq_pair_to_weight=True``     — TRT requires weight QDQ.
+      - ``dedicated_qdq_pair=True``         — avoids shared QDQ across branches.
+      - ``optypes_to_exclude_output_quant`` — left default (empty) for now.
+
+    INC 2.x API. If a future plan bumps to INC 3.x, ``PostTrainingQuantConfig``
+    goes away in favour of per-algorithm config classes (e.g. ``SmoothQuantConfig``).
+    """
+    try:
+        # INC 2.x still imports pkg_resources internally. On Python 3.13
+        # this requires setuptools<81. Installation gotcha, not an API change.
+        from neural_compressor.config import PostTrainingQuantConfig
+        from neural_compressor.quantization import fit as inc_fit
+    except ImportError as e:
+        raise RuntimeError(
+            "neural-compressor 2.x not installed. Install with: "
+            "pip install 'neural-compressor>=2.5,<3.0' 'setuptools<81'"
+        ) from e
+
+    calibrator = (recipe.technique.calibrator or "minmax").lower()
+    if calibrator not in ("minmax", "smoothquant"):
+        raise ValueError(
+            f"neural_compressor backend supports calibrator in "
+            f"['minmax','smoothquant'], got {calibrator!r}"
+        )
+
+    n_samples = int(recipe.technique.calibration_samples or 512)
+    seed = int(recipe.technique.calibration_seed or 42)
+    bs_tag = "dyn" if dynamic else "bs1"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = cache_dir / (
+        f"{Path(recipe.model.weights).stem}_{imgsz}_inc_{calibrator}_"
+        f"{n_samples}_s{seed}_{bs_tag}.qdq.onnx"
+    )
+    if cached.exists():
+        print(f"[info] neural_compressor cache hit: {cached.name}", file=sys.stderr)
+        return cached
+
+    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
+                              cache_dir=cache_dir, dynamic=dynamic)
+    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
+
+    import onnx
+
+    model_proto = onnx.load(str(clean_onnx))
+    input_name = model_proto.graph.input[0].name
+    del model_proto
+
+    class _IncCalibLoader:
+        """Minimal INC-compatible dataloader: iterable of (inputs_dict, label)."""
+
+        def __init__(self, arr, name: str, batch_size: int = 1):
+            self._arr = arr
+            self._name = name
+            self.batch_size = batch_size
+
+        def __iter__(self):
+            for x in self._arr:
+                if x.ndim == 3:
+                    x = x[None, ...]
+                yield ({self._name: x}, None)
+
+        def __len__(self):
+            return len(self._arr)
+
+    recipes = {
+        "add_qdq_pair_to_weight": True,
+        "dedicated_qdq_pair": True,
+    }
+    if calibrator == "smoothquant":
+        recipes["smooth_quant"] = True
+        recipes["smooth_quant_args"] = {"alpha": 0.5}
+
+    conf = PostTrainingQuantConfig(
+        approach="static",
+        backend="default",
+        recipes=recipes,
+    )
+    loader = _IncCalibLoader(calib_arr, input_name, batch_size=1)
+    print(
+        f"[info] neural_compressor.fit: method={calibrator}, samples={n_samples}, "
+        f"onnx={clean_onnx.name}",
+        file=sys.stderr,
+    )
+    q_model = inc_fit(model=str(clean_onnx), conf=conf, calib_dataloader=loader)
+    # INC's save writes {dir}/best_model.onnx. Accept either save(str) or a
+    # directory convention; normalize to the cached path we advertised.
+    save_dir = cached.parent / (cached.stem + "_incdir")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    q_model.save(str(save_dir))
+    produced = save_dir / "best_model.onnx"
+    if not produced.exists():
+        # Fallback: some INC versions write model.onnx or use the stem.
+        candidates = list(save_dir.glob("*.onnx"))
+        if not candidates:
+            raise RuntimeError(
+                f"neural_compressor save produced no .onnx under {save_dir}"
+            )
+        produced = candidates[0]
+    produced.replace(cached)
+    # External weights files (if any) get dragged alongside.
+    for extra in save_dir.glob("*"):
+        extra.replace(cached.parent / extra.name)
+    save_dir.rmdir()
+    print(f"[info] neural_compressor wrote QDQ onnx: {cached}", file=sys.stderr)
+    return cached
+
+
 # Short tags appear in engine cache filenames. Long ``technique.source`` names
 # (e.g. ``neural_compressor``) push paths past Windows' 260-char MAX_PATH when
 # combined with the imgsz/calibrator/bs/version suffixes already in the tag.
@@ -387,6 +506,8 @@ def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         return _prepare_modelopt_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     if source == "ort_quant":
         return _prepare_ort_quant_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
+    if source == "neural_compressor":
+        return _prepare_inc_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     raise ValueError(f"unknown technique.source: {source!r}")
 
 
