@@ -376,6 +376,140 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     return cached
 
 
+def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
+                           dynamic: bool = True) -> Path:
+    """Quantize via Brevitas (PyTorch-native) and export QDQ ONNX that
+    TensorRT's explicit-quantization path consumes identically to
+    modelopt/ort_quant output.
+
+    Supported ``technique.calibrator`` values:
+      - ``percentile`` — activation scale from p99.99 of observed values
+      - ``mse``        — activation scale minimizing MSE of (Q(x)-x)
+      - ``entropy``    — KL-divergence calibration (Brevitas impl)
+      - ``gptq``       — weight-only GPTQ correction (Brevitas-specific);
+                         activations stay on percentile
+
+    Quantizer config enforces the TRT compat checklist:
+      - per-channel symmetric INT8 weights on Conv axis=0
+      - per-tensor symmetric INT8 activations (zero_point=0)
+      - no bias quantization (TRT computes INT32 bias from act*weight scales)
+    """
+    _BREVITAS_ALGOS = ("percentile", "mse", "entropy", "gptq")
+    algo = (recipe.technique.calibrator or "percentile").lower()
+    if algo not in _BREVITAS_ALGOS:
+        raise ValueError(
+            f"brevitas backend supports calibrator in {list(_BREVITAS_ALGOS)}, "
+            f"got {algo!r}"
+        )
+
+    try:
+        import torch
+        from brevitas.graph.quantize import preprocess_for_quantize, quantize
+        from brevitas.graph.calibrate import calibration_mode
+        from brevitas.graph.gptq import gptq_mode
+        from brevitas.export import export_onnx_qcdq
+        from brevitas.quant.scaled_int import (
+            Int8ActPerTensorFloat,
+            Int8WeightPerChannelFloat,
+        )
+    except ImportError as e:
+        raise RuntimeError(
+            "brevitas not available. Install with `pip install brevitas>=0.11`."
+        ) from e
+
+    n_samples = int(recipe.technique.calibration_samples or 512)
+    seed = int(recipe.technique.calibration_seed or 42)
+    bs_tag = "dyn" if dynamic else "bs1"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = cache_dir / (
+        f"{Path(recipe.model.weights).stem}_{imgsz}_brev_{algo}_"
+        f"{n_samples}_s{seed}_{bs_tag}.qdq.onnx"
+    )
+    if cached.exists():
+        print(f"[info] brevitas cache hit: {cached.name}", file=sys.stderr)
+        return cached
+
+    # Brevitas works on nn.Module, not ONNX. Load the ultralytics PyTorch model,
+    # strip the detection wrapper, and move to CUDA for calibration.
+    from ultralytics import YOLO
+
+    yolo = YOLO(recipe.model.weights)
+    module = yolo.model.eval()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    module = module.to(device)
+
+    # Activation scale configuration.
+    act_kwargs = {}
+    if algo == "percentile":
+        act_kwargs["high_percentile_q"] = 99.99
+        act_kwargs["low_percentile_q"] = 0.01
+
+    module = preprocess_for_quantize(module)
+    module = quantize(
+        module,
+        weight_quant=Int8WeightPerChannelFloat,
+        act_quant=Int8ActPerTensorFloat,
+        bias_quant=None,
+        **({"act_quant_kwargs": act_kwargs} if act_kwargs else {}),
+    )
+
+    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
+
+    import numpy as np
+
+    def _batch_iter(arr, bs: int = 8):
+        for i in range(0, len(arr), bs):
+            chunk = arr[i:i + bs]
+            if chunk.ndim == 3:
+                chunk = chunk[None, ...]
+            yield torch.from_numpy(np.ascontiguousarray(chunk)).to(device)
+
+    print(
+        f"[info] brevitas calibrate: algo={algo}, samples={n_samples}, "
+        f"weights={Path(recipe.model.weights).name}",
+        file=sys.stderr,
+    )
+    module.eval()
+    with torch.no_grad():
+        with calibration_mode(module):
+            for x in _batch_iter(calib_arr):
+                module(x)
+        if algo == "gptq":
+            with gptq_mode(module, use_quant_activations=True) as gptq:
+                for _ in range(gptq.num_layers):
+                    for x in _batch_iter(calib_arr):
+                        gptq.model(x)
+                    gptq.update()
+
+    dummy = torch.zeros((1, 3, imgsz, imgsz), device=device)
+    raw_out = cache_dir / (cached.stem + ".raw.onnx")
+    export_onnx_qcdq(module, args=dummy, export_path=str(raw_out), opset_version=17)
+    print(f"[info] brevitas exported raw QDQ onnx: {raw_out.name}", file=sys.stderr)
+
+    try:
+        from onnxruntime.quantization.shape_inference import quant_pre_process
+
+        quant_pre_process(
+            input_model_path=str(raw_out),
+            output_model_path=str(cached),
+            skip_optimization=False,
+            skip_onnx_shape=False,
+            skip_symbolic_shape=False,
+            auto_merge=True,
+            verbose=0,
+        )
+        print(f"[info] brevitas wrote QDQ onnx: {cached}", file=sys.stderr)
+    except Exception as e:
+        print(
+            f"[warn] brevitas preprocess failed ({e}); using raw export",
+            file=sys.stderr,
+        )
+        raw_out.replace(cached)
+
+    return cached
+
+
 # Short tags appear in engine cache filenames. Long ``technique.source`` names
 # push paths past Windows' 260-char MAX_PATH when combined with the
 # imgsz/calibrator/bs/version suffixes already in the tag.
