@@ -34,8 +34,11 @@ trt = [
     "tensorrt>=10.0",
     "polygraphy>=0.49",
 ]
+brevitas = [
+    "brevitas>=0.11",
+]
 all = [
-    "omnioptimizer[torch,onnx,trt]",
+    "omnioptimizer[torch,onnx,trt,brevitas]",
 ]
 
 [project.scripts]
