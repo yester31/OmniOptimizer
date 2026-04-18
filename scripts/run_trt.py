@@ -206,6 +206,123 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     return cached
 
 
+def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
+                            dynamic: bool = True) -> Path:
+    """Quantize via ``onnxruntime.quantization.quantize_static`` — emits QDQ
+    ONNX that TensorRT's explicit-quantization path consumes identically to
+    modelopt's output.
+
+    Calibration method map (1:1 with ``onnxruntime.quantization.CalibrationMethod``):
+    ``minmax`` / ``entropy`` / ``percentile`` / ``distribution``.
+
+    TRT requires symmetric per-tensor activation and per-channel symmetric
+    weight quantization. ORT defaults to asymmetric activation, which TRT
+    rejects (or silently falls back), so we force symmetry via ``extra_options``
+    — this matches what modelopt does internally.
+    """
+    try:
+        from onnxruntime.quantization import (
+            CalibrationDataReader,
+            CalibrationMethod,
+            QuantFormat,
+            QuantType,
+            quantize_static,
+        )
+    except ImportError as e:
+        raise RuntimeError(
+            "onnxruntime.quantization not available. Install onnxruntime>=1.17."
+        ) from e
+
+    method_map = {
+        "minmax": CalibrationMethod.MinMax,
+        "entropy": CalibrationMethod.Entropy,
+        "percentile": CalibrationMethod.Percentile,
+        "distribution": CalibrationMethod.Distribution,
+    }
+    calibrator = (recipe.technique.calibrator or "minmax").lower()
+    if calibrator not in method_map:
+        raise ValueError(
+            f"ort_quant backend supports calibrator in {sorted(method_map)}, "
+            f"got {calibrator!r}"
+        )
+
+    n_samples = int(recipe.technique.calibration_samples or 512)
+    seed = int(recipe.technique.calibration_seed or 42)
+    bs_tag = "dyn" if dynamic else "bs1"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = cache_dir / (
+        f"{Path(recipe.model.weights).stem}_{imgsz}_ort_{calibrator}_"
+        f"{n_samples}_s{seed}_{bs_tag}.qdq.onnx"
+    )
+    if cached.exists():
+        print(f"[info] ort_quant cache hit: {cached.name}", file=sys.stderr)
+        return cached
+
+    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
+                              cache_dir=cache_dir, dynamic=dynamic)
+    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
+
+    import onnx
+
+    model_proto = onnx.load(str(clean_onnx))
+    input_name = model_proto.graph.input[0].name
+    del model_proto
+
+    class _NumpyReader(CalibrationDataReader):
+        def __init__(self, arr, name: str):
+            self._iter = iter(arr)
+            self._name = name
+
+        def get_next(self):
+            try:
+                x = next(self._iter)
+            except StopIteration:
+                return None
+            if x.ndim == 3:
+                x = x[None, ...]
+            return {self._name: x}
+
+    nodes_to_exclude = list(recipe.technique.nodes_to_exclude or [])
+    print(
+        f"[info] onnxruntime.quantize_static: method={calibrator}, "
+        f"samples={n_samples}, excludes={len(nodes_to_exclude)}, "
+        f"onnx={clean_onnx.name}",
+        file=sys.stderr,
+    )
+    quantize_static(
+        model_input=str(clean_onnx),
+        model_output=str(cached),
+        calibration_data_reader=_NumpyReader(calib_arr, input_name),
+        quant_format=QuantFormat.QDQ,
+        activation_type=QuantType.QInt8,
+        weight_type=QuantType.QInt8,
+        per_channel=True,
+        reduce_range=False,
+        calibrate_method=method_map[calibrator],
+        nodes_to_exclude=nodes_to_exclude or None,
+        extra_options={
+            "ActivationSymmetric": True,
+            "WeightSymmetric": True,
+            "AddQDQPairToWeight": True,
+            "DedicatedQDQPair": True,
+        },
+    )
+    print(f"[info] ort_quant wrote QDQ onnx: {cached}", file=sys.stderr)
+    return cached
+
+
+# Short tags appear in engine cache filenames. Long ``technique.source`` names
+# (e.g. ``neural_compressor``) push paths past Windows' 260-char MAX_PATH when
+# combined with the imgsz/calibrator/bs/version suffixes already in the tag.
+_SOURCE_TAG = {
+    "trt_builtin": "",
+    "modelopt": "_modelopt",
+    "ort_quant": "_ort",
+    "neural_compressor": "_inc",
+}
+
+
 def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed: int):
     """Return (N,3,H,W) float32 numpy array for modelopt.onnx calibration.
 
@@ -269,9 +386,7 @@ def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     if source == "modelopt":
         return _prepare_modelopt_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     if source == "ort_quant":
-        raise NotImplementedError(
-            "technique.source='ort_quant' is not in the OmniOptimizer roadmap yet."
-        )
+        return _prepare_ort_quant_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     raise ValueError(f"unknown technique.source: {source!r}")
 
 
@@ -702,7 +817,7 @@ def run(recipe_path: str, out_path: str) -> int:
     bs1_engine: Optional[Path] = None  # referenced later for mAP eval
 
     source = recipe.technique.source
-    source_suffix = "" if source == "trt_builtin" else f"_{source}"
+    source_suffix = _SOURCE_TAG.get(source, f"_{source}")
     tf32_suffix = "_tf32" if enable_tf32 else ""
     for bs in recipe.measurement.batch_sizes:
         onnx_path, quant_preapplied = _prepare_onnx(recipe, imgsz, onnx_cache, bs)
