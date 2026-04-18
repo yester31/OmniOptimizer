@@ -28,7 +28,7 @@ class TechniqueSpec(BaseModel):
     # v1.1+ plans to add "modelopt" (nvidia-modelopt: torch-level quantization
     # + QDQ-ONNX export) and possibly "ort_quant" for ONNX Runtime's quantizer.
     source: Literal[
-        "trt_builtin", "modelopt", "ort_quant"
+        "trt_builtin", "modelopt", "ort_quant", "brevitas"
     ] = "trt_builtin"
     calibrator: Optional[str] = None
     calibration_samples: Optional[int] = None
