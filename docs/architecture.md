@@ -13,7 +13,7 @@ a bank of (runtime × technique) recipes end-to-end, then recommends the best on
 
 - **Model**: YOLO26n (Ultralytics).
 - **Hardware**: one NVIDIA GPU (Ampere+ for sparsity recipes / TF32).
-- **Runtimes × Techniques** — 25 recipes:
+- **Runtimes × Techniques** — 22 recipes:
   - PyTorch eager FP32 (#01), `torch.compile` FP16 (#02).
   - ONNX Runtime CUDA EP (#03) / TensorRT EP (#04), both FP16.
   - Native TensorRT: FP32 (#00), FP32+TF32 (#00-tf32), FP16 (#05), INT8 PTQ (#06).
@@ -21,7 +21,6 @@ a bank of (runtime × technique) recipes end-to-end, then recommends the best on
     mixed precision (#12).
   - INT8 `ort_quant` (`onnxruntime.quantization.quantize_static`): minmax (#13),
     entropy (#14), percentile (#15), distribution (#16).
-  - INT8 `neural_compressor` (INC 2.x): MinMax PTQ (#17), SmoothQuant (#18).
   - INT8 `brevitas` (PyTorch-native PTQ → QDQ ONNX): percentile (#20),
     MSE (#21), entropy (#22), GPTQ (#23).
   - **Parked** (need training pipeline): #07 trt_int8_sparsity, #11 modelopt_sparsity,
@@ -104,9 +103,8 @@ Beyond the critical rules kept in CLAUDE.md, these guide runner development:
   selected by `TechniqueSpec.source` in the recipe YAML. Current dispatch targets:
   `trt_builtin` (TRT's entropy calibrator + `SPARSE_WEIGHTS`), `modelopt`
   (ONNX-path QDQ via `modelopt.onnx.quantization.quantize`), `ort_quant`
-  (`onnxruntime.quantization.quantize_static`), `neural_compressor` (INC 2.x
-  `fit()`, recipes inactive — see below), `brevitas` (PyTorch-level PTQ via
-  `brevitas.graph.quantize` + `export_onnx_qcdq`). Adding a new backend means: one `_prepare_*_onnx` helper in
+  (`onnxruntime.quantization.quantize_static`), `brevitas` (PyTorch-level PTQ
+  via `brevitas.graph.quantize` + `export_onnx_qcdq`). Adding a new backend means: one `_prepare_*_onnx` helper in
   `run_trt.py` that emits QDQ ONNX, one dispatcher branch in `_prepare_onnx`,
   and an entry in `_SOURCE_TAG` for engine cache filename shortening.
   `_build_engine` and `_make_trt_forward` do not change — they consume QDQ ONNX
