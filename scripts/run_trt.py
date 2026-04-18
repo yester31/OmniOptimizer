@@ -495,16 +495,21 @@ def _build_engine(
             cache_file = engine_path.with_suffix(".calib")
             val_yaml = os.environ.get("OMNI_COCO_YAML")
             calibrator = None
+            # Calibrator batch must match the optimization profile's batch,
+            # otherwise TRT rejects the calibration shape on engine build
+            # for bs > 1. Previously hardcoded to 1, which silently relied
+            # on a cached bs=8 engine from an earlier era.
+            calib_shape = (batch_size, 3, imgsz, imgsz)
             if val_yaml and Path(val_yaml).exists():
                 try:
                     calibrator = _make_coco_calibrator(
-                        shape=(1, 3, imgsz, imgsz),
+                        shape=calib_shape,
                         n_samples=calib_samples,
                         cache_path=cache_file,
                         seed=calib_seed,
                         val_yaml_path=val_yaml,
                     )
-                    print(f"[info] INT8 calib: coco images from {val_yaml}", file=sys.stderr)
+                    print(f"[info] INT8 calib: coco images from {val_yaml} (bs={batch_size})", file=sys.stderr)
                 except Exception as e:
                     print(f"[warn] coco calibrator failed ({e})", file=sys.stderr)
             if calibrator is None:
@@ -516,7 +521,7 @@ def _build_engine(
                         "(known to drop mAP by double digits)."
                     )
                 calibrator = _make_random_calibrator(
-                    shape=(1, 3, imgsz, imgsz),
+                    shape=calib_shape,
                     n_samples=calib_samples,
                     cache_path=cache_file,
                     seed=calib_seed,

@@ -1,35 +1,35 @@
 {
   "recipe": "modelopt_int8_percentile",
-  "started_at": "2026-04-17T17:42:39.961471+00:00",
-  "finished_at": "2026-04-17T17:58:00.921132+00:00",
+  "started_at": "2026-04-18T03:37:38.221504+00:00",
+  "finished_at": "2026-04-18T03:47:33.101499+00:00",
   "env": {
     "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
     "gpu_compute_capability": "8.6",
-    "cuda": "12.4",
-    "cudnn": "90100",
+    "cuda": "12.9",
+    "cudnn": "91002",
     "driver": "576.80",
-    "tensorrt": "10.16.1.11",
-    "os": "Linux 5.15.167.4-microsoft-standard-WSL2",
-    "python": "3.10.12",
-    "torch": "2.6.0+cu124",
+    "tensorrt": "10.16.0.72",
+    "os": "Windows 11",
+    "python": "3.13.3",
+    "torch": "2.8.0+cu129",
     "onnxruntime": "1.22.0",
     "ultralytics": "8.4.27"
   },
   "model_size_mb": null,
   "latency_ms": {
-    "p50": 2.293491000045833,
-    "p95": 2.808430550066987,
-    "p99": 3.5893703501460594
+    "p50": 2.7289500139886513,
+    "p95": 6.03860501432791,
+    "p99": 11.97554001613756
   },
   "throughput_fps": {
-    "bs1": 436.01653548237863,
-    "bs8": 674.9529230773833
+    "bs1": 366.441303385544,
+    "bs8": 777.9187753703816
   },
-  "peak_gpu_mem_mb": 38.05517578125,
-  "cold_start_ms": 100.97854300011022,
+  "peak_gpu_mem_mb": 38.05615234375,
+  "cold_start_ms": 456.0766000067815,
   "accuracy": {
-    "map_50": 0.5198393122494634,
-    "map_50_95": 0.3635107594905776
+    "map_50": 0.5210740707623124,
+    "map_50_95": 0.3651125919491342
   },
   "meets_constraints": true,
   "notes": null
