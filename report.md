@@ -20,9 +20,10 @@ Baseline: `pytorch_fp32`  |  GPU: `NVIDIA GeForce RTX 3060 Laptop GPU`  |  CUDA:
 | 13 | `modelopt_int8_mixed` | 418.9 | 859.7 | 2.39 | — | 0.537 | +1.64%p | 38 | ✘ |
 | 14 | `modelopt_int8_entropy` | 409.1 | 859.6 | 2.44 | — | 0.537 | +1.64%p | 38 | ✘ |
 | 15 | `modelopt_int8_ptq` | 400.3 | 766.9 | 2.50 | — | 0.521 | +3.19%p | 38 | ✘ |
-| 16 | `modelopt_int8_percentile` | 366.4 | 777.9 | 2.73 | — | 0.521 | +3.19%p | 38 | ✘ |
-| 17 | `inc_int8_ptq` | — | — | — | — | — | — | — | ✘ |
-| 18 | `inc_int8_smoothquant` | — | — | — | — | — | — | — | ✘ |
+| 16 | `brevitas_int8_entropy` | 372.6 | 630.2 | 2.68 | — | 0.543 | +1.02%p | 91 | ✘ |
+| 17 | `modelopt_int8_percentile` | 366.4 | 777.9 | 2.73 | — | 0.521 | +3.19%p | 38 | ✘ |
+| 18 | `brevitas_int8_mse` | 362.5 | 635.9 | 2.76 | — | 0.543 | +1.02%p | 91 | ✘ |
+| 19 | `brevitas_int8_percentile` | 66.5 | 629.1 | 15.05 | — | 0.543 | +1.02%p | 80 | ✘ |
 
 ## Recommendation
 
@@ -39,10 +40,7 @@ Baseline: `pytorch_fp32`  |  GPU: `NVIDIA GeForce RTX 3060 Laptop GPU`  |  CUDA:
 - `modelopt_int8_mixed`: mAP drop 1.64%p > 1.0%p
 - `modelopt_int8_entropy`: mAP drop 1.64%p > 1.0%p
 - `modelopt_int8_ptq`: mAP drop 3.19%p > 1.0%p
+- `brevitas_int8_entropy`: mAP drop 1.02%p > 1.0%p
 - `modelopt_int8_percentile`: mAP drop 3.19%p > 1.0%p
-- `inc_int8_ptq`: missing measurements | bs=1: build failed (onnx parse failed:
-In node 255 with name: /model.2/Concat and operator: Concat (parseNode): INVALID_GRAPH: Assertion failed: (ctx->tensors().count(inputName)): Node input was not registered.); bs=8: build failed (onnx parse failed:
-In node 255 with name: /model.2/Concat and operator: Concat (parseNode): INVALID_GRAPH: Assertion failed: (ctx->tensors().count(inputName)): Node input was not registered.)
-- `inc_int8_smoothquant`: missing measurements | bs=1: build failed (onnx parse failed:
-In node 625 with name: /model.10/m/m.0/attn/Reshape_2_quant and operator: Reshape (parseNode): INVALID_NODE: Invalid Node - /model.10/m/m.0/attn/Reshape_2_quant
-ITensor::getDimensions: Error Code 4: Shape Error (reshape changes volume. Reshaping [1,2,32,400] to [1,128,20,20]. In nvinfer1::builder::reshapeCanFaultHelper::<lambda_1>::operator () at C:\_src\optimizer\common\shape\shapeContext.cpp:4634)); bs=8: build failed (engine build returned None)
+- `brevitas_int8_mse`: mAP drop 1.02%p > 1.0%p
+- `brevitas_int8_percentile`: mAP drop 1.02%p > 1.0%p

@@ -13,7 +13,7 @@ a bank of (runtime × technique) recipes end-to-end, then recommends the best on
 
 - **Model**: YOLO26n (Ultralytics).
 - **Hardware**: one NVIDIA GPU (Ampere+ for sparsity recipes / TF32).
-- **Runtimes × Techniques** — 22 recipes:
+- **Runtimes × Techniques** — 21 recipes:
   - PyTorch eager FP32 (#01), `torch.compile` FP16 (#02).
   - ONNX Runtime CUDA EP (#03) / TensorRT EP (#04), both FP16.
   - Native TensorRT: FP32 (#00), FP32+TF32 (#00-tf32), FP16 (#05), INT8 PTQ (#06).
@@ -21,8 +21,9 @@ a bank of (runtime × technique) recipes end-to-end, then recommends the best on
     mixed precision (#12).
   - INT8 `ort_quant` (`onnxruntime.quantization.quantize_static`): minmax (#13),
     entropy (#14), percentile (#15), distribution (#16).
-  - INT8 `brevitas` (PyTorch-native PTQ → QDQ ONNX): percentile (#20),
-    MSE (#21), entropy (#22), GPTQ (#23).
+  - INT8 `brevitas` (PyTorch-native eager PTQ → QDQ ONNX): percentile (#20),
+    MSE (#21), entropy (#22). GPTQ dropped — requires Brevitas graph-mode,
+    which fx-traces YOLO26n and fails on ultralytics' Python-flow forward.
   - **Parked** (need training pipeline): #07 trt_int8_sparsity, #11 modelopt_sparsity,
     #19 inc_int8_qat.
 - **Metrics**: p50/p95/p99 latency (wall-clock + CUDA Event GPU-only), fps (bs=1, 8),
