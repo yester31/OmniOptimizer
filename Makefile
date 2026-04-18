@@ -8,7 +8,7 @@ REPORT := report.md
         recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 recipe-07 \
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
         recipe-13 recipe-14 recipe-15 recipe-16 \
-        recipe-20 recipe-21 recipe-22 recipe-23 \
+        recipe-20 recipe-21 recipe-22 \
         diagnose-recipe-%
 
 # Re-run a single recipe:  make recipe-11
@@ -23,7 +23,7 @@ all: recipe-00 recipe-00-tf32 \
      recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 \
      recipe-08 recipe-09 recipe-10 recipe-12 \
      recipe-13 recipe-14 recipe-15 recipe-16 \
-     recipe-20 recipe-21 recipe-22 recipe-23 \
+     recipe-20 recipe-21 recipe-22 \
      report
 
 env:
@@ -91,9 +91,6 @@ recipe-21:
 
 recipe-22:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/22_brevitas_int8_entropy.yaml --out $(RESULTS_DIR)/22_brevitas_int8_entropy.json
-
-recipe-23:
-	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/23_brevitas_int8_gptq.yaml --out $(RESULTS_DIR)/23_brevitas_int8_gptq.json
 
 # Parked recipes keep their JSON on disk for history but are dropped from the
 # ranking. #7/#11 need sparsity-aware training.

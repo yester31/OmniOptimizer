@@ -378,23 +378,28 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
 
 def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
                            dynamic: bool = True) -> Path:
-    """Quantize via Brevitas (PyTorch-native) and export QDQ ONNX that
-    TensorRT's explicit-quantization path consumes identically to
+    """Quantize via Brevitas (PyTorch-native, eager-mode) and export QDQ ONNX
+    that TensorRT's explicit-quantization path consumes identically to
     modelopt/ort_quant output.
+
+    Eager-mode layer replacement (Conv2d → QuantConv2d, Linear → QuantLinear)
+    is used in place of Brevitas's graph-mode ``quantize`` because ultralytics'
+    ``YOLO.forward`` uses Python-level list iteration that ``torch.fx`` cannot
+    trace. Eager-mode keeps the original ultralytics module tree intact, so
+    ``yolo.export(format='onnx')`` still reaches its deploy-path wrapper and
+    emits the NMS-ready output layout the evaluation code expects.
 
     Supported ``technique.calibrator`` values:
       - ``percentile`` — activation scale from p99.99 of observed values
-      - ``mse``        — activation scale minimizing MSE of (Q(x)-x)
-      - ``entropy``    — KL-divergence calibration (Brevitas impl)
-      - ``gptq``       — weight-only GPTQ correction (Brevitas-specific);
-                         activations stay on percentile
+      - ``mse``        — Brevitas default MSE-minimizing activation scale
+      - ``entropy``    — Brevitas percentile + moving avg (approximate)
 
     Quantizer config enforces the TRT compat checklist:
       - per-channel symmetric INT8 weights on Conv axis=0
       - per-tensor symmetric INT8 activations (zero_point=0)
       - no bias quantization (TRT computes INT32 bias from act*weight scales)
     """
-    _BREVITAS_ALGOS = ("percentile", "mse", "entropy", "gptq")
+    _BREVITAS_ALGOS = ("percentile", "mse", "entropy")
     algo = (recipe.technique.calibrator or "percentile").lower()
     if algo not in _BREVITAS_ALGOS:
         raise ValueError(
@@ -402,19 +407,29 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
             f"got {algo!r}"
         )
 
+    # Brevitas 0.10-0.12 pin `dependencies==2.0.1`, whose _check_dunder_name
+    # rejects Brevitas's own internal injector classes. Neutralize it before
+    # any brevitas import. Harmless no-op if the upstream pin is ever relaxed.
+    try:
+        import _dependencies.checks.injector as _dep_inj
+        _dep_inj._check_dunder_name = lambda name: None
+    except ImportError:
+        pass
+
     try:
         import torch
-        from brevitas.graph.quantize import preprocess_for_quantize, quantize
+        from torch import nn
+        from brevitas import nn as qnn
         from brevitas.graph.calibrate import calibration_mode
-        from brevitas.graph.gptq import gptq_mode
         from brevitas.export import export_onnx_qcdq
         from brevitas.quant.scaled_int import (
             Int8ActPerTensorFloat,
             Int8WeightPerChannelFloat,
         )
-    except ImportError as e:
+    except Exception as e:
         raise RuntimeError(
-            "brevitas not available. Install with `pip install brevitas>=0.11`."
+            f"brevitas not available ({type(e).__name__}: {e}). "
+            "Install with `pip install brevitas>=0.10`."
         ) from e
 
     n_samples = int(recipe.technique.calibration_samples or 512)
@@ -429,28 +444,82 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         print(f"[info] brevitas cache hit: {cached.name}", file=sys.stderr)
         return cached
 
-    # Brevitas works on nn.Module, not ONNX. Load the ultralytics PyTorch model,
-    # strip the detection wrapper, and move to CUDA for calibration.
     from ultralytics import YOLO
 
     yolo = YOLO(recipe.model.weights)
-    module = yolo.model.eval()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    module = module.to(device)
+    yolo.model = yolo.model.to(device).eval()
 
-    # Activation scale configuration.
-    act_kwargs = {}
+    # Activation scale knobs per algorithm.
+    act_kwargs: dict = {"return_quant_tensor": False}
     if algo == "percentile":
+        act_kwargs["act_quant"] = Int8ActPerTensorFloat
         act_kwargs["high_percentile_q"] = 99.99
         act_kwargs["low_percentile_q"] = 0.01
+    else:
+        # mse / entropy keep Brevitas defaults. Entropy is approximated by
+        # Brevitas's moving-average observer; both still produce symmetric
+        # per-tensor activation scales compatible with TRT.
+        act_kwargs["act_quant"] = Int8ActPerTensorFloat
 
-    module = preprocess_for_quantize(module)
-    module = quantize(
-        module,
-        weight_quant=Int8WeightPerChannelFloat,
-        act_quant=Int8ActPerTensorFloat,
-        bias_quant=None,
-        **({"act_quant_kwargs": act_kwargs} if act_kwargs else {}),
+    def _swap_layer(parent: nn.Module, name: str, child: nn.Module):
+        if isinstance(child, nn.Conv2d):
+            new = qnn.QuantConv2d(
+                in_channels=child.in_channels,
+                out_channels=child.out_channels,
+                kernel_size=child.kernel_size,
+                stride=child.stride,
+                padding=child.padding,
+                dilation=child.dilation,
+                groups=child.groups,
+                bias=(child.bias is not None),
+                weight_quant=Int8WeightPerChannelFloat,
+                input_quant=act_kwargs["act_quant"],
+                input_quant_kwargs={k: v for k, v in act_kwargs.items()
+                                    if k not in ("act_quant", "return_quant_tensor")},
+                bias_quant=None,
+                return_quant_tensor=False,
+            )
+            new.weight.data = child.weight.data.clone()
+            if child.bias is not None:
+                new.bias.data = child.bias.data.clone()
+            new = new.to(device)
+            setattr(parent, name, new)
+            return True
+        if isinstance(child, nn.Linear):
+            new = qnn.QuantLinear(
+                in_features=child.in_features,
+                out_features=child.out_features,
+                bias=(child.bias is not None),
+                weight_quant=Int8WeightPerChannelFloat,
+                input_quant=act_kwargs["act_quant"],
+                input_quant_kwargs={k: v for k, v in act_kwargs.items()
+                                    if k not in ("act_quant", "return_quant_tensor")},
+                bias_quant=None,
+                return_quant_tensor=False,
+            )
+            new.weight.data = child.weight.data.clone()
+            if child.bias is not None:
+                new.bias.data = child.bias.data.clone()
+            new = new.to(device)
+            setattr(parent, name, new)
+            return True
+        return False
+
+    def _walk(module: nn.Module):
+        replaced = 0
+        for name, child in list(module.named_children()):
+            if _swap_layer(module, name, child):
+                replaced += 1
+            else:
+                replaced += _walk(child)
+        return replaced
+
+    n_swapped = _walk(yolo.model)
+    print(
+        f"[info] brevitas swapped {n_swapped} Conv2d/Linear layers "
+        f"(algo={algo})",
+        file=sys.stderr,
     )
 
     val_yaml = os.environ.get("OMNI_COCO_YAML")
@@ -470,21 +539,48 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         f"weights={Path(recipe.model.weights).name}",
         file=sys.stderr,
     )
-    module.eval()
+    yolo.model.eval()
     with torch.no_grad():
-        with calibration_mode(module):
+        with calibration_mode(yolo.model):
             for x in _batch_iter(calib_arr):
-                module(x)
-        if algo == "gptq":
-            with gptq_mode(module, use_quant_activations=True) as gptq:
-                for _ in range(gptq.num_layers):
-                    for x in _batch_iter(calib_arr):
-                        gptq.model(x)
-                    gptq.update()
+                yolo.model(x)
+
+    # Export via ultralytics' exporter so the inference head wrapper (NMS-ready
+    # output layout) is preserved — raw torch.onnx.export on yolo.model would
+    # emit feature-map outputs that the validator can't consume.
+    # StdQCDQONNXManager globally registers QDQ symbolic functions for
+    # QuantConv2d/QuantLinear; once set_export_mode is on, torch.onnx.export
+    # (called from inside ultralytics.Exporter) emits Q/DQ nodes around the
+    # quantized layers.
+    # Put ultralytics Detect head(s) in export mode so forward() emits the
+    # NMS-ready concatenated tensor instead of a tuple of feature maps.
+    # ultralytics.Exporter would normally do this, but it also deepcopies the
+    # model, which fails on Brevitas quant layers (non-leaf cached tensors).
+    # Bypass Exporter and drive Brevitas's own export_onnx_qcdq directly.
+    try:
+        from ultralytics.nn.modules import Detect
+        detect_heads = [m for m in yolo.model.modules() if isinstance(m, Detect)]
+    except ImportError:
+        detect_heads = []
+    for head in detect_heads:
+        head.export = True
+        head.format = "onnx"
 
     dummy = torch.zeros((1, 3, imgsz, imgsz), device=device)
     raw_out = cache_dir / (cached.stem + ".raw.onnx")
-    export_onnx_qcdq(module, args=dummy, export_path=str(raw_out), opset_version=17)
+    try:
+        export_onnx_qcdq(
+            yolo.model,
+            args=dummy,
+            export_path=str(raw_out),
+            opset_version=17,
+            dynamic_axes={"images": {0: "batch"}} if dynamic else None,
+            input_names=["images"],
+        )
+    finally:
+        for head in detect_heads:
+            head.export = False
+
     print(f"[info] brevitas exported raw QDQ onnx: {raw_out.name}", file=sys.stderr)
 
     try:
