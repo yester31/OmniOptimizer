@@ -1,0 +1,33 @@
+name: brevitas_int8_entropy
+model:
+  family: yolo26
+  variant: n
+  weights: yolo26n.pt
+  ultralytics_version: null
+runtime:
+  engine: tensorrt
+  version: null
+  dtype: int8
+technique:
+  name: int8_ptq
+  source: brevitas
+  calibrator: entropy
+  calibration_samples: 512
+  calibration_dataset: coco_val2017
+  calibration_seed: 42
+hardware:
+  gpu: null
+  cuda: null
+  driver: null
+measurement:
+  dataset: coco_val2017
+  num_images: 500
+  warmup_iters: 100
+  measure_iters: 100
+  batch_sizes: [1, 8]
+  input_size: 640
+  gpu_clock_lock: true
+  seed: 42
+constraints:
+  max_map_drop_pct: 2.0
+  min_fps_bs1: 30
