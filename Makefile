@@ -23,7 +23,7 @@ all: recipe-00 recipe-00-tf32 \
      recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 \
      recipe-08 recipe-09 recipe-10 recipe-12 \
      recipe-13 recipe-14 recipe-15 recipe-16 \
-     recipe-20 recipe-21 recipe-22 \
+     recipe-20 recipe-21 \
      report
 
 env:
@@ -94,7 +94,7 @@ recipe-22:
 
 # Parked recipes keep their JSON on disk for history but are dropped from the
 # ranking. #7/#11 need sparsity-aware training.
-PARKED := trt_int8_sparsity,modelopt_int8_sparsity
+PARKED := trt_int8_sparsity,modelopt_int8_sparsity,brevitas_int8_entropy
 
 report:
 	$(PYTHON) scripts/recommend.py --results-dir $(RESULTS_DIR) --out $(REPORT) --exclude "$(PARKED)"

@@ -391,16 +391,23 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
 
     Supported ``technique.calibrator`` values:
       - ``percentile`` — activation scale from p99.99 of observed values
-      - ``mse``        — Brevitas default MSE-minimizing activation scale
-      - ``entropy``    — Brevitas percentile + moving avg (approximate)
+      - ``mse``        — Brevitas MSE-minimizing act + weight quantizers
+      - ``entropy``    — NOT SUPPORTED; Brevitas 0.10.x has no entropy/KL
+        observer. Raises NotImplementedError. Recipe #22 is parked.
 
     Quantizer config enforces the TRT compat checklist:
       - per-channel symmetric INT8 weights on Conv axis=0
       - per-tensor symmetric INT8 activations (zero_point=0)
       - no bias quantization (TRT computes INT32 bias from act*weight scales)
     """
-    _BREVITAS_ALGOS = ("percentile", "mse", "entropy")
+    _BREVITAS_ALGOS = ("percentile", "mse")
     algo = (recipe.technique.calibrator or "percentile").lower()
+    if algo == "entropy":
+        raise NotImplementedError(
+            "brevitas backend: 'entropy' calibrator is not supported — Brevitas "
+            "has no entropy/KL activation observer in 0.10.x. Use 'percentile' "
+            "or 'mse'. Recipe #22 is parked for this reason."
+        )
     if algo not in _BREVITAS_ALGOS:
         raise ValueError(
             f"brevitas backend supports calibrator in {list(_BREVITAS_ALGOS)}, "
@@ -424,7 +431,9 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         from brevitas.export import export_onnx_qcdq
         from brevitas.quant.scaled_int import (
             Int8ActPerTensorFloat,
+            Int8ActPerTensorFloatMSE,
             Int8WeightPerChannelFloat,
+            Int8WeightPerChannelFloatMSE,
         )
     except Exception as e:
         raise RuntimeError(
@@ -450,17 +459,21 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     yolo.model = yolo.model.to(device).eval()
 
-    # Activation scale knobs per algorithm.
-    act_kwargs: dict = {"return_quant_tensor": False}
+    # Distinct quantizer classes per algorithm so that calibration actually
+    # produces different activation/weight scales. The previous implementation
+    # passed all knobs through kwargs and left mse/entropy at defaults — which
+    # silently produced byte-identical ONNX across all three variants.
     if algo == "percentile":
-        act_kwargs["act_quant"] = Int8ActPerTensorFloat
-        act_kwargs["high_percentile_q"] = 99.99
-        act_kwargs["low_percentile_q"] = 0.01
+        class _PercentileAct(Int8ActPerTensorFloat):
+            high_percentile_q = 99.99
+            low_percentile_q = 0.01
+        act_quant_cls = _PercentileAct
+        weight_quant_cls = Int8WeightPerChannelFloat
+    elif algo == "mse":
+        act_quant_cls = Int8ActPerTensorFloatMSE
+        weight_quant_cls = Int8WeightPerChannelFloatMSE
     else:
-        # mse / entropy keep Brevitas defaults. Entropy is approximated by
-        # Brevitas's moving-average observer; both still produce symmetric
-        # per-tensor activation scales compatible with TRT.
-        act_kwargs["act_quant"] = Int8ActPerTensorFloat
+        raise AssertionError(f"unreachable algo={algo!r}")
 
     def _swap_layer(parent: nn.Module, name: str, child: nn.Module):
         if isinstance(child, nn.Conv2d):
@@ -473,10 +486,8 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
                 dilation=child.dilation,
                 groups=child.groups,
                 bias=(child.bias is not None),
-                weight_quant=Int8WeightPerChannelFloat,
-                input_quant=act_kwargs["act_quant"],
-                input_quant_kwargs={k: v for k, v in act_kwargs.items()
-                                    if k not in ("act_quant", "return_quant_tensor")},
+                weight_quant=weight_quant_cls,
+                input_quant=act_quant_cls,
                 bias_quant=None,
                 return_quant_tensor=False,
             )
@@ -491,10 +502,8 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
                 in_features=child.in_features,
                 out_features=child.out_features,
                 bias=(child.bias is not None),
-                weight_quant=Int8WeightPerChannelFloat,
-                input_quant=act_kwargs["act_quant"],
-                input_quant_kwargs={k: v for k, v in act_kwargs.items()
-                                    if k not in ("act_quant", "return_quant_tensor")},
+                weight_quant=weight_quant_cls,
+                input_quant=act_quant_cls,
                 bias_quant=None,
                 return_quant_tensor=False,
             )

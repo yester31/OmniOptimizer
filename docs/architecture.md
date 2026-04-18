@@ -9,11 +9,11 @@ document when planning non-trivial changes.
 Give it a model + a target GPU + constraints (max mAP drop, min fps), and it runs
 a bank of (runtime × technique) recipes end-to-end, then recommends the best one.
 
-## Current scope (post Wave 4, 2026-04-18)
+## Current scope (post Wave 4 calibrator-fix, 2026-04-18)
 
 - **Model**: YOLO26n (Ultralytics).
 - **Hardware**: one NVIDIA GPU (Ampere+ for sparsity recipes / TF32).
-- **Runtimes × Techniques** — 21 recipes:
+- **Runtimes × Techniques** — 21 recipes defined, 18 active in `make all`:
   - PyTorch eager FP32 (#01), `torch.compile` FP16 (#02).
   - ONNX Runtime CUDA EP (#03) / TensorRT EP (#04), both FP16.
   - Native TensorRT: FP32 (#00), FP32+TF32 (#00-tf32), FP16 (#05), INT8 PTQ (#06).
@@ -22,10 +22,14 @@ a bank of (runtime × technique) recipes end-to-end, then recommends the best on
   - INT8 `ort_quant` (`onnxruntime.quantization.quantize_static`): minmax (#13),
     entropy (#14), percentile (#15), distribution (#16).
   - INT8 `brevitas` (PyTorch-native eager PTQ → QDQ ONNX): percentile (#20),
-    MSE (#21), entropy (#22). GPTQ dropped — requires Brevitas graph-mode,
-    which fx-traces YOLO26n and fails on ultralytics' Python-flow forward.
-  - **Parked** (need training pipeline): #07 trt_int8_sparsity, #11 modelopt_sparsity,
-    #19 inc_int8_qat.
+    MSE (#21). Entropy (#22) parked — Brevitas 0.10.x has no entropy/KL
+    activation observer, and silently fell back to default stats, producing
+    byte-identical ONNX to percentile. GPTQ dropped — requires Brevitas
+    graph-mode, which fx-traces YOLO26n and fails on ultralytics' Python-flow
+    forward.
+  - **Parked**: #07 trt_int8_sparsity, #11 modelopt_sparsity, #19 inc_int8_qat
+    (need training pipeline); #22 brevitas_int8_entropy (no supporting
+    observer in Brevitas 0.10.x).
 - **Metrics**: p50/p95/p99 latency (wall-clock + CUDA Event GPU-only), fps (bs=1, 8),
   peak GPU mem (torch + NVML delta), mAP@0.5 / mAP@0.5-0.95, model size, cold-start.
 
@@ -66,7 +70,7 @@ that keeps drifting) justifies it.
 
 ```bash
 # End-to-end: run all active recipes and emit report.md
-# (21 defined; #7/#11/#19 parked, so `make all` runs 18.)
+# (21 defined; #7/#11/#19/#22 parked, so `make all` runs 18.)
 make all
 
 # One recipe at a time
