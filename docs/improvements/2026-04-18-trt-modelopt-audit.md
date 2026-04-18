@@ -575,6 +575,113 @@ M2와 AutoQuantize는 이번 라운드에서 뺌.
 
 ---
 
+## v3 실행 플랜 — 병렬 분석 + 웨이브 (재정렬 반영)
+
+v2 재검토를 기반으로 **파일/함수 단위 충돌 맵**을 그리고 실제로 병렬 가능한 작업을 확정.
+
+### 파일/함수 충돌 매트릭스
+
+| 대상 | 수정 작업 (Task ID) | 병렬 가능? |
+|---|---|---|
+| `run_trt.py::_build_engine` | H2 (#9), L1 (#10 일부), TF32 (#15) | ❌ 직렬 |
+| `run_trt.py::_prepare_modelopt_onnx` | L1 (#10 일부) | (자연스레 #10 세트) |
+| `run_trt.py::run()` (engine_tag) | N2 (#11) | ⚠ 같은 파일, 다른 함수 |
+| `run_trt.py::_make_trt_forward` | H1 (#13) | ✅ 격리 함수 |
+| `_schemas.py::LatencyStats` | M3 (#14) | ✅ 독립 |
+| `measure.py::measure_latency` | M3 (#14), L2 peak mem (#16) | ❌ 묶어야 함 |
+| `recommend.py` | M3 (#14) | (#14 세트) |
+| `Makefile` | M4 diagnose (#16), AutoTune (#17) | ⚠ 같은 파일 |
+| `README.md` | L3 deprecated (#16) | ✅ 독립 |
+| `scripts/autotune.py` (신규) | AutoTune (#17) | ✅ 신규 |
+| `recipes/00_trt_fp32.yaml` (신규) | TF32 (#15) | ✅ 신규 |
+
+**핵심 관측:**
+- `_build_engine`를 건드리는 #9/#10/#15는 직렬 필수. 마찰 피하려면 같은 PR로 묶거나 순서대로.
+- `_make_trt_forward`는 다른 함수라 병렬 에이전트로 분리 가능.
+- #14(schema) + #16(measure.py peak mem)은 같은 `measure.py`를 건드리므로 **#16-부분을 #14에 흡수**하는 게 깔끔.
+- #12 RGB/BGR은 단발 진단 (수정 없을 수도), 어디서든 가능.
+- #17 AutoTune은 신규 파일이라 완전 독립.
+
+### 웨이브 플랜 (재정렬)
+
+#### **Wave 1 — 고확률·저공수 배치 (~1–1.5시간, 두 트랙 병렬)**
+
+**Track A (메인 스레드, `run_trt.py` 직렬):**
+1. **#12 RGB/BGR 확인** (5분, 진단) — 결과에 따라 #10 validation 추가 여부 결정
+2. **#11 Engine cache version suffix** (10분) — `engine_tag` 한 줄
+3. **#9 Timing cache reuse** (30분) — `_build_engine` 상단에 캐시 로드/저장
+4. **#10 Random calib fallback → error** (10분) — `_prepare_modelopt_onnx` + `_build_engine` 경로 검증
+
+모두 `run_trt.py` 중심이므로 직렬이 자연스러움. 각 단계마다 `pytest tests/` + `make recipe-05`
+스모크 체크.
+
+**Track B (서브에이전트, 격리 함수):**
+- **#13 CUDA graph via `torch.cuda.CUDAGraph`** (45–60분) — `_make_trt_forward`만 수정
+- 입력: 문서 H1 섹션 + v2 수정. torch.cuda.CUDAGraph API 사용. capture 실패 시 기존 경로로 fallback.
+- 검증: 재구축된 bs=1 엔진으로 recipe-05 실측 → 이전 대비 −3~−8% 달성 확인.
+
+Track A와 B는 **같은 run_trt.py**를 건드리지만 **다른 함수** → 충돌 발생 시 rebase 용이.
+Track B 먼저 완료되어 병합 → Track A는 최신 HEAD 위에서 작업. 또는 반대.
+
+#### **Wave 2 — 측정 인프라 확장 (~2–3시간, 두 트랙 병렬)**
+
+**Track C (메인 or 에이전트):**
+- **#14 + #16(부분) CUDA Event + Peak mem 이중 측정 통합**
+- 수정: `_schemas.LatencyStats`에 `p50_gpu` 추가, `measure.py::measure_latency`에 CUDA event 경로 +
+  NVML delta peak mem, `recommend.py` 컬럼 한 개 추가, 기존 10개 Result JSON 재측정 or lazy null.
+- 리스크: schema 변경이라 기존 JSON 로드 시 `p50_gpu=None` 허용해야 함 (Optional[float]).
+
+**Track D (메인 스레드, 병렬):**
+- **#15 TRT FP32 baseline + TF32 toggle** (30분 + 실측)
+  - `recipes/00_trt_fp32.yaml` (TF32 off) + `recipes/00_trt_fp32_tf32.yaml` (TF32 on)
+  - `_build_engine`에 FP32/TF32 처리 추가 (1줄)
+  - `make recipe-00`, `make recipe-00-tf32` 실측 → 실제 이득 1–4% 근거 확보
+- **#16(나머지) L3 deprecated note + M4 polygraphy diagnose target** — README/Makefile 작은 문구
+
+Track C와 D는 파일 충돌 없음 (C는 `_schemas/measure/recommend`, D는 `recipes/_build_engine/README/Makefile`).
+
+#### **Wave 3 — 별도 실험 에픽 (독립 브랜치, 시간 되는 날)**
+
+**#17 AutoTune experimental target**
+- `scripts/autotune.py` 신규 + `Makefile`에 `autotune-recipe-%` 타겟
+- `make all`에서 분리 (수 시간 소요)
+- 별도 브랜치 `epic/autotune`에서 진행
+- 일회성 측정 → 결과는 `results/_autotune/`로
+
+### 실행 타임라인 (이상적)
+
+```
+시간      00:00        01:30        04:00               훗날
+         ┌────────────┬────────────┬──────────────────┬──────
+Wave 1-A │ 12→11→9→10 │            │                  │
+Wave 1-B │ 13 (agent) │            │                  │
+         │            │─ merge ─   │                  │
+Wave 2-C │            │ 14+16-부분 │                  │
+Wave 2-D │            │ 15, 16-나머지│                 │
+         │            │            │─ merge, publish ─│
+Wave 3   │            │            │                  │ 17 AutoTune
+         └────────────┴────────────┴──────────────────┴──────
+```
+
+총 ~4시간으로 H1,H2,L1,L2(부분),L3,M1,M3,M4,N1,N2 처리. H3(AutoTune)만 별도.
+
+### 제외 재확인
+
+- **M2 `OBEY_PRECISION_CONSTRAINTS`** — QDQ-ONNX 경로에선 효과 불명, 실험 가치 낮아 제외.
+- **AutoQuantize** — `학습 코드` 부재로 v1.3 이후.
+- **FP8/INT4/DLA/Cross-GPU** — v2+ scope (CLAUDE.md 일치).
+
+### 리스크와 완화
+
+| 리스크 | 완화 |
+|---|---|
+| Track A 중 `_build_engine` diff 충돌 | 순서대로 커밋, 각 커밋 후 `pytest` + smoke recipe 실행 |
+| Track B의 CUDAGraph 캡처가 capture mode 제약으로 실패 | try/except fallback → 로그 경고 + 기존 경로 유지 |
+| #14 schema 변경이 기존 JSON 로드 깨뜨림 | 새 필드는 `Optional[...] = None`로 추가, 기존 JSON load 영향 없음 |
+| #17 AutoTune이 수 시간 잡아먹고 실패 | `make all`과 분리, 실패해도 main 파이프라인 영향 없음 |
+
+---
+
 ## 바로 반영 안 하는 항목 (범위 밖 / 의도적 보류)
 
 - **FP8 / NVFP4 / INT4**: RTX 3060 Laptop (SM 8.6)에서 지원 안 함. Hopper (SM 9.0+) 이상만.
