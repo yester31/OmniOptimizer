@@ -9,11 +9,11 @@ document when planning non-trivial changes.
 Give it a model + a target GPU + constraints (max mAP drop, min fps), and it runs
 a bank of (runtime × technique) recipes end-to-end, then recommends the best one.
 
-## Current scope (post Wave 4 calibrator-fix, 2026-04-18)
+## Current scope (post Wave 5 training pipeline, 2026-04-20)
 
 - **Model**: YOLO26n (Ultralytics).
 - **Hardware**: one NVIDIA GPU (Ampere+ for sparsity recipes / TF32).
-- **Runtimes × Techniques** — 21 recipes defined, 18 active in `make all`:
+- **Runtimes × Techniques** — 21 recipes defined, **20 active + 1 parked** in `make all`:
   - PyTorch eager FP32 (#01), `torch.compile` FP16 (#02).
   - ONNX Runtime CUDA EP (#03) / TensorRT EP (#04), both FP16.
   - Native TensorRT: FP32 (#00), FP32+TF32 (#00-tf32), FP16 (#05), INT8 PTQ (#06).
@@ -27,10 +27,11 @@ a bank of (runtime × technique) recipes end-to-end, then recommends the best on
     byte-identical ONNX to percentile. GPTQ dropped — requires Brevitas
     graph-mode, which fx-traces YOLO26n and fails on ultralytics' Python-flow
     forward.
-  - **Parked**: #07 trt_int8_sparsity, #11 modelopt_sparsity (need training
-    pipeline); #22 brevitas_int8_entropy (no supporting observer in
-    Brevitas 0.10.x). `#19 inc_int8_qat` was dropped, not parked — INC
-    backend was removed in Wave 3 (9d064ca).
+  - **Parked**: #22 brevitas_int8_entropy only (no supporting observer in
+    Brevitas 0.10.x). #07 trt_int8_sparsity and #11 modelopt_int8_sparsity
+    are now **active** (Wave 5 training pipeline). #17 modelopt_int8_qat is
+    new and **active** (Wave 5). `#19 inc_int8_qat` was dropped, not parked —
+    INC backend was removed in Wave 3 (9d064ca).
 - **Metrics**: p50/p95/p99 latency (wall-clock + CUDA Event GPU-only), fps (bs=1, 8),
   peak GPU mem (torch + NVML delta), mAP@0.5 / mAP@0.5-0.95, model size, cold-start.
 
@@ -71,7 +72,7 @@ that keeps drifting) justifies it.
 
 ```bash
 # End-to-end: run all active recipes and emit report.md
-# (21 defined; #7/#11/#22 parked, so `make all` runs 18.)
+# (21 defined; #22 parked; #07/#11/#17 active via Wave 5, so `make all` runs 20.)
 make all
 
 # One recipe at a time
@@ -124,6 +125,51 @@ Beyond the critical rules kept in CLAUDE.md, these guide runner development:
   - Per-channel weights on `axis=0` for Conv; per-tensor for activations.
   - Run ORT's `quant_pre_process` (shape inference + folding) before
     `quantize_static` — otherwise histogram calibrators OOM on attention graphs.
+## Wave 5 — Training pipeline (2026-04-20)
+
+QAT/sparsity 레시피는 recipe YAML의 ``technique.training`` 섹션으로 학습
+파라미터를 기술하고, ``scripts/train.py`` 가 modifier별 전후훅을 실행.
+
+- ``#07 trt_int8_sparsity``: ``prune_24`` modifier — magnitude 2:4 pruning
+  + SAT 60 epochs (forward_pre_hook + mask 영구 적용 후 plain state_dict 저장).
+- ``#11 modelopt_int8_sparsity``: ``modelopt_sparsify`` modifier —
+  ``modelopt.torch.sparsity.sparsify(sparse_magnitude, 2:4)`` 60 epochs +
+  ``mto.save/restore``.
+- ``#17 modelopt_int8_qat``: ``modelopt_qat`` modifier — ``mtq.quantize(INT8_DEFAULT_CFG)``
+  fake quant 삽입 + 30 epochs QAT at ``lr0=1e-4`` (AMP=False, scale 안정).
+
+설계 원칙:
+- Modifier 플러그인 (`scripts/_modifiers/{prune_24,modelopt_sparsify,modelopt_qat}.py`)
+  각자 ``apply(yolo, spec)`` + ``finalize(yolo, spec, out_pt)`` 노출. prune_24는
+  PRE_TRAIN_HOOK=True 플래그로 ultralytics on_train_start 콜백 안에서 적용.
+- In-memory ``yolo.model`` (또는 학습 후 ``yolo.trainer.model``) 직접 직렬화 →
+  ultralytics EMA-based best.pt 선택 회피로 validation leak 차단.
+- modelopt modifier는 AMP 비활성 + ``modelopt.torch.opt.save/restore``로 wrapped
+  state (QuantConv, QuantLinear) 보존. prune_24는 plain ultralytics checkpoint 포맷.
+- Silent no-op guard: 세 modifier 모두 ``apply()``가 실제로 0 레이어에 적용된
+  경우 ``RuntimeError`` 발생. 2:4 패턴은 finalize에서 assert.
+- 출력: ``trained_weights/{recipe.name}.pt`` (+ ``.train.json`` 메타데이터).
+  Git 추적 대상 아님 (``.gitignore``).
+
+재현은 ``bash scripts/run_qr_train_batch.sh`` (학습 ~2h) → ``bash scripts/run_qr_batch.sh``
+(평가). Smoke dry-run: ``OMNI_TRAIN_SMOKE=1 bash scripts/run_qr_train_batch.sh``
+(1 epoch + 10% data).
+
+설계 스펙: ``docs/superpowers/specs/2026-04-20-qr-training-pipeline-design.md``.
+Implementation plan: ``docs/superpowers/plans/2026-04-20-qr-training-pipeline.md``.
+
+### Waves 1-5 현황
+
+| Wave | 범주 | 레시피 수 | 상태 |
+|---|---|---|---|
+| Wave 1 | TRT builtin (FP32/FP16/INT8 PTQ) | #00-#06 | active |
+| Wave 2 | modelopt INT8 PTQ | #08-#12 | active |
+| Wave 3 | ONNX Runtime INT8 | #13-#16 | active (INC는 dropped) |
+| Wave 4 | Brevitas eager PTQ | #20-#21 | active (#22 parked: no entropy observer) |
+| Wave 5 | Training pipeline (QAT/sparsity) | #07, #11, #17 | active (2026-04-20) |
+
+**Active 20 + Parked 1 = 21 총 레시피**.
+
 - **Windows-specific gotchas**:
   - `torch.cuda` only for CUDA context sharing (never `pycuda.autoinit`).
   - Engine cache filenames include short `_SOURCE_TAG` prefixes (`_ort`, `_inc`)
