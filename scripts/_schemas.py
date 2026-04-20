@@ -42,6 +42,32 @@ class TechniqueSpec(BaseModel):
     # v1.2: ONNX node names to leave at FP16 during modelopt.onnx quantize.
     # Protects sensitivity-critical layers (stem Conv, detect head branches).
     nodes_to_exclude: Optional[list[str]] = None
+    # v1.3: fine-tune before quantize (QAT / sparsity recovery). None for
+    # PTQ-only recipes. Drives scripts/train.py; see TrainingSpec.
+    training: Optional["TrainingSpec"] = None
+
+
+class TrainingSpec(BaseModel):
+    """Fine-tuning recipe for QAT / sparsity modifiers.
+
+    Appears under ``TechniqueSpec.training`` and activates the
+    ``scripts/train.py`` entry point. Absent for non-training recipes.
+    """
+    base_checkpoint: str
+    epochs: int
+    batch: int = 8
+    workers: int = 4
+    imgsz: int = 640
+    lr0: float = 0.001
+    optimizer: str = "AdamW"
+    seed: int = 42
+    data_yaml: Optional[str] = None
+    modifier: Literal["prune_24", "modelopt_sparsify", "modelopt_qat"]
+    prune_amount: Optional[float] = None
+    quant_config: Optional[str] = "int8_default"
+
+
+TechniqueSpec.model_rebuild()
 
 
 class HardwareSpec(BaseModel):
