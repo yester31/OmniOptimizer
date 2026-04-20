@@ -24,11 +24,26 @@ if TYPE_CHECKING:
 def apply(yolo: "YOLO", spec: "TrainingSpec") -> None:
     import modelopt.torch.sparsity as ms
 
-    ms.sparsify(
-        yolo.model,
-        mode="sparse_magnitude",
-    )
-    print("[modelopt_sparsify] sparsify(sparse_magnitude, 2:4) applied")
+    ms.sparsify(yolo.model, mode="sparse_magnitude")
+
+    # Verify at least one layer actually got a non-trivial mask. modelopt
+    # silently skips layers that don't meet shape constraints (e.g.,
+    # in_channels % 16 != 0); if every layer is skipped, _weight_mask ends
+    # up all-ones and TRT SPARSE_WEIGHTS becomes a no-op.
+    sparsified = 0
+    for _, m in yolo.model.named_modules():
+        mask = getattr(m, "_weight_mask", None)
+        if mask is not None and not bool(mask.all().item()):
+            sparsified += 1
+    if sparsified == 0:
+        raise RuntimeError(
+            "modelopt_sparsify.apply: no layers were actually sparsified. "
+            "All eligible layers may have been skipped by modelopt due to "
+            "shape constraints (e.g., in_channels % 16 != 0). Check "
+            "model architecture."
+        )
+    print(f"[modelopt_sparsify] sparsify(sparse_magnitude, 2:4) applied — "
+          f"{sparsified} layers sparsified")
 
 
 def finalize(yolo: "YOLO", spec: "TrainingSpec", out_pt: Path) -> None:
