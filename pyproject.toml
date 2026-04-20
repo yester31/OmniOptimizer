@@ -48,4 +48,7 @@ omni-run-trt = "scripts.run_trt:main"
 omni-recommend = "scripts.recommend:main"
 
 [tool.setuptools]
-packages = ["scripts"]
+packages = ["scripts", "scripts._modifiers"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

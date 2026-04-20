@@ -101,10 +101,16 @@ def _finalize_module(module: nn.Module) -> None:
 def apply(yolo: "YOLO", spec: "TrainingSpec") -> None:
     """Mutate ``yolo.model`` in-place to add 2:4 mask parametrizations."""
     applied = 0
-    for name, m in yolo.model.named_modules():
+    for _, m in yolo.model.named_modules():
         if _is_eligible_module(m):
             _apply_2_4_mask_to_module(m)
             applied += 1
+    if applied == 0:
+        raise RuntimeError(
+            "prune_24.apply: no eligible modules found for 2:4 pruning. "
+            "Check model architecture (expected Conv2d/Linear with numel >= 16, "
+            "non-depthwise)."
+        )
     print(f"[prune_24] applied 2:4 mask to {applied} modules")
 
 

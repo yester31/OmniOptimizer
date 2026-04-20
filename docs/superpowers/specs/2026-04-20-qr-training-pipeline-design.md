@@ -176,8 +176,8 @@ mto.restore(yolo.model, str(trained_pt))  # modelopt 구조 복원 + trained wei
 `mto.restore()`는 구조를 `trained_pt`에 저장된 modelopt_state로 재구성하고, 같은 파일의 state_dict를 붙임. 초기 `YOLO(...)` 의 weights는 restore 시 덮어써짐 — architecture 출발점 역할만.
 
 ### `prune_24`는 예외
-- `prune.remove()` 후 결과는 plain state_dict (mask가 weight에 영구 적용돼 0으로 박힘)
-- 일반 `torch.save({'model': yolo.model.state_dict()}, ...)` 로 저장
+- `prune.remove()` 후 결과는 plain module (mask가 weight에 영구 적용돼 0으로 박힘)
+- `torch.save({'model': yolo.model}, ...)` 로 저장 — ultralytics는 `ckpt['model'].float()`로 모듈 인스턴스를 로드하므로 state_dict가 아닌 module 자체 저장 필요
 - `run_trt.py`는 `prune_24` modifier에 대해선 기존 경로 그대로 (plain load)
 
 ### Runner 로드 로직 (`scripts/run_trt.py`)

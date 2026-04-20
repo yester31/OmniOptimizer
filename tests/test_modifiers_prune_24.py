@@ -44,3 +44,20 @@ def test_finalize_removes_pruning_parametrization():
     _finalize_module(conv)
     assert not hasattr(conv, "weight_orig")
     assert _has_2_4_pattern(conv.weight)
+
+
+def test_apply_raises_when_no_eligible_modules():
+    """apply() must raise rather than silently produce a 0%-sparse model."""
+    from scripts._modifiers.prune_24 import apply as apply_24
+    from scripts._schemas import TrainingSpec
+
+    class _NoEligibleYolo:
+        # Model with only tiny layers that fail size threshold
+        def __init__(self):
+            self.model = nn.Sequential(nn.Linear(2, 2))  # numel = 4, < 16
+
+    spec = TrainingSpec(
+        base_checkpoint="x.pt", epochs=1, modifier="prune_24",
+    )
+    with pytest.raises(RuntimeError, match="no eligible modules"):
+        apply_24(_NoEligibleYolo(), spec)
