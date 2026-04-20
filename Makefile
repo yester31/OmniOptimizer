@@ -94,7 +94,7 @@ recipe-22:
 
 # Parked recipes keep their JSON on disk for history but are dropped from the
 # ranking. #7/#11 need sparsity-aware training.
-PARKED := trt_int8_sparsity,modelopt_int8_sparsity,brevitas_int8_entropy
+PARKED := brevitas_int8_entropy
 
 report:
 	$(PYTHON) scripts/recommend.py --results-dir $(RESULTS_DIR) --out $(REPORT) --exclude "$(PARKED)"
@@ -110,6 +110,11 @@ diagnose-recipe-%:
 	polygraphy run $$ONNX --validate --log-file $(RESULTS_DIR)/_diag/recipe$*.validate.log || true; \
 	polygraphy run $$ONNX --trt --debug-precision --log-file $(RESULTS_DIR)/_diag/recipe$*.debug_precision.log || true; \
 	echo "logs in $(RESULTS_DIR)/_diag/"
+
+train-qr:
+	bash scripts/run_qr_train_batch.sh
+
+.PHONY: train-qr
 
 clean:
 	rm -rf $(RESULTS_DIR)/*.json $(REPORT) *.engine *.onnx build/ dist/ *.egg-info/

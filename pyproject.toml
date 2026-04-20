@@ -37,8 +37,9 @@ trt = [
 brevitas = [
     "brevitas>=0.11",
 ]
+modelopt = ["nvidia-modelopt>=0.15"]
 all = [
-    "omnioptimizer[torch,onnx,trt,brevitas]",
+    "omnioptimizer[torch,onnx,trt,brevitas,modelopt]",
 ]
 
 [project.scripts]
