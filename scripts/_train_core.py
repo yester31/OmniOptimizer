@@ -102,8 +102,35 @@ def train_with_modifier(recipe: "Recipe") -> Path:
     print(f"[train] loading base: {base}")
     yolo = _load_yolo(str(base))
 
-    print(f"[train] applying modifier: {spec.modifier}")
-    modifier.apply(yolo, spec)
+    # Some modifiers (e.g. prune_24) mutate model weights in a way that
+    # conflicts with ultralytics' internal trainer.get_model(weights=model)
+    # call, which re-constructs a fresh model from yaml and then calls
+    # model.load(weights).  When torch.nn.utils.prune has been applied,
+    # state_dict keys change (weight → weight_orig / weight_mask) and the
+    # load() call raises a KeyError.
+    #
+    # Modifiers that set PRE_TRAIN_HOOK = True defer their apply() into an
+    # on_train_start callback so that it runs *after* ultralytics has built
+    # its fresh model, thereby avoiding the key mismatch.
+    use_hook = getattr(modifier, "PRE_TRAIN_HOOK", False)
+
+    if use_hook:
+        print(f"[train] modifier {spec.modifier!r} uses PRE_TRAIN_HOOK — "
+              f"apply() will run inside on_train_start callback")
+
+        def _on_train_start(trainer):
+            print(f"[train] on_train_start: applying {spec.modifier} to trainer.model")
+            # Create a lightweight proxy so modifier.apply() can receive
+            # trainer.model via the yolo-like .model attribute.
+            class _ModelProxy:
+                def __init__(self, model):
+                    self.model = model
+            modifier.apply(_ModelProxy(trainer.model), spec)
+
+        yolo.add_callback("on_train_start", _on_train_start)
+    else:
+        print(f"[train] applying modifier: {spec.modifier}")
+        modifier.apply(yolo, spec)
 
     run_name = recipe.name
     print(f"[train] ultralytics model.train(epochs={spec.epochs}, "
@@ -115,6 +142,14 @@ def train_with_modifier(recipe: "Recipe") -> Path:
     out_dir = ROOT / "trained_weights"
     out_dir.mkdir(exist_ok=True)
     out_pt = out_dir / f"{recipe.name}.pt"
+
+    # For PRE_TRAIN_HOOK modifiers (e.g. prune_24) the pruned/sparsified
+    # model lives at yolo.trainer.model — ultralytics replaces yolo.model
+    # with a freshly-loaded best.pt after training.  Restore the in-memory
+    # trained model so that finalize() can bake masks / call mto.save.
+    if use_hook and hasattr(yolo, "trainer") and yolo.trainer is not None:
+        print(f"[train] restoring yolo.model from trainer.model for finalize()")
+        yolo.model = yolo.trainer.model
 
     print(f"[train] calling {spec.modifier}.finalize(out_pt={out_pt})")
     modifier.finalize(yolo, spec, out_pt)
