@@ -36,18 +36,41 @@ measurement:
 
 
 def test_dispatch_prune_24(tmp_path, monkeypatch):
-    """train.py should route prune_24 recipes to the prune_24 modifier."""
+    """train.py should route prune_24 recipes via PRE_TRAIN_HOOK callback.
+
+    prune_24 sets PRE_TRAIN_HOOK = True so _train_core defers apply() into
+    an on_train_start callback (registered via yolo.add_callback).  The fake
+    _run_ultralytics_train must fire that callback manually to simulate what
+    ultralytics does in real training.
+    """
     from scripts import train, _train_core
     recipe_path = _write_recipe(tmp_path, "prune_24")
     called = {}
 
     def fake_train(yolo, spec, run_name):
         called["trained"] = True
+        # Simulate ultralytics firing the on_train_start callback.
+        # _train_core registers via yolo.add_callback; ultralytics stores
+        # callbacks in yolo.callbacks dict.
+        for cb in yolo.callbacks.get("on_train_start", []):
+            trainer_stub = MagicMock()
+            trainer_stub.model = nn.Linear(4, 4)
+            cb(trainer_stub)
+        # Also set yolo.trainer so the post-train model restore succeeds.
+        yolo.trainer = MagicMock()
+        yolo.trainer.model = nn.Linear(4, 4)
         return tmp_path / "dummy_runs" / run_name / "weights" / "last.pt"
 
     def fake_load_yolo(path):
         m = MagicMock()
         m.model = nn.Linear(4, 4)
+        # Provide a real callbacks dict so add_callback works correctly.
+        m.callbacks = {}
+
+        def _add_callback(event, fn):
+            m.callbacks.setdefault(event, []).append(fn)
+
+        m.add_callback = _add_callback
         return m
 
     monkeypatch.setattr(_train_core, "_run_ultralytics_train", fake_train)
@@ -64,7 +87,10 @@ def test_dispatch_prune_24(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "finalize", lambda y, s, p: p.write_bytes(b"fake"))
 
     train.main([f"--recipe={recipe_path}", "--force"])
-    assert applied == ["applied"]
+    # apply() is called inside the on_train_start callback, not directly.
+    assert applied == ["applied"], (
+        "apply() should have been called once via the on_train_start callback"
+    )
     assert (out / "test_r.pt").exists()
     assert called.get("trained") is True
 
