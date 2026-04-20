@@ -44,6 +44,32 @@ from scripts.measure import (  # noqa: E402
 from scripts import _split  # noqa: E402
 
 
+def _resolve_weights(recipe: Recipe) -> str:
+    """Return the weights path for runner consumption.
+
+    If the recipe has ``technique.training``, prefer ``trained_weights/{name}.pt``
+    produced by ``scripts/train.py``. Currently returns a plain path for
+    ``prune_24`` modifier (state_dict is ultralytics-compatible). Modelopt
+    modifiers (sparsify/qat) need additional restore — see Task 8.
+    """
+    if recipe.technique.training is None:
+        return recipe.model.weights
+    trained = ROOT / "trained_weights" / f"{recipe.name}.pt"
+    if not trained.exists():
+        raise RuntimeError(
+            f"Recipe {recipe.name!r} requires training but {trained} is "
+            f"missing. Run: python scripts/train.py --recipe "
+            f"recipes/{recipe.name}.yaml"
+        )
+    modifier = recipe.technique.training.modifier
+    if modifier == "prune_24":
+        return str(trained)
+    # modelopt_sparsify / modelopt_qat handled in Task 8
+    raise NotImplementedError(
+        f"_resolve_weights for modifier={modifier!r} not wired yet"
+    )
+
+
 def _seed_all(seed: int) -> None:
     random.seed(seed)
     try:
