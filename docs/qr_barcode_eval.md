@@ -1,5 +1,12 @@
 # QR/Barcode Fine-tuned Checkpoint Evaluation
 
+> **DEPRECATED — replaced by [`qr_barcode_eval_v2.md`](qr_barcode_eval_v2.md).**
+>
+> 이 v1 결과는 INT8 캘리브레이션과 평가가 같은 QR val 133장을 공유해 **100% overlap
+> 상태에서 측정**됐습니다. 그 결과 mAP@50-95 가 최대 **+1.6%p 과대** 또는
+> **-1.6%p 과소** 평가됐으며, 구체적 편향 크기는 v2 문서에 기록했습니다. 새 결과는
+> v2 를 참조하세요. 이 문서는 편향 확인용 기록으로만 유지합니다.
+
 OmniOptimizer 전체 레시피 뱅크를 **QR/Barcode 전용 fine-tuned 체크포인트**로 재평가한
 결과입니다. 기본 YOLO26n (COCO) 평가와 별도로 보관됩니다.
 

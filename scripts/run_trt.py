@@ -41,6 +41,7 @@ from scripts.measure import (  # noqa: E402
     measure_latency,
     throughput_from_latency,
 )
+from scripts import _split  # noqa: E402
 
 
 def _seed_all(seed: int) -> None:
@@ -179,7 +180,7 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
 
     samples = recipe.technique.calibration_samples or 512
     seed = recipe.technique.calibration_seed or 42
-    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    val_yaml = _split.calib_yaml()
     calib_data = _build_calib_numpy(val_yaml, samples, imgsz, seed)
 
     quant_kwargs = dict(
@@ -309,7 +310,7 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
             preproc_path = clean_onnx
     source_onnx = preproc_path
 
-    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    val_yaml = _split.calib_yaml()
     calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
 
     import onnx
@@ -531,7 +532,7 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         file=sys.stderr,
     )
 
-    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    val_yaml = _split.calib_yaml()
     calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
 
     import numpy as np
@@ -656,12 +657,13 @@ def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed
 
     if os.environ.get("OMNI_ALLOW_RANDOM_CALIB") != "1":
         raise RuntimeError(
-            "Calibration data unavailable: OMNI_COCO_YAML is not set or the "
-            "referenced dataset produced no readable images. Random-normal "
-            "calibration silently drops INT8 mAP by double digits. Set "
-            "OMNI_COCO_YAML to a valid ultralytics dataset yaml (with a val "
-            "split pointing at real images), or pass OMNI_ALLOW_RANDOM_CALIB=1 "
-            "to explicitly opt in to the random-normal fallback."
+            "Calibration data unavailable: neither OMNI_CALIB_YAML nor "
+            "OMNI_COCO_YAML points at a dataset producing readable images. "
+            "Random-normal calibration silently drops INT8 mAP by double "
+            "digits. Set OMNI_CALIB_YAML (or OMNI_COCO_YAML) to a valid "
+            "ultralytics dataset yaml (with a val split pointing at real "
+            "images), or pass OMNI_ALLOW_RANDOM_CALIB=1 to explicitly opt in "
+            "to the random-normal fallback."
         )
     print("[warn] OMNI_ALLOW_RANDOM_CALIB=1: using random-normal calibration "
           "(INT8 mAP will be degraded)", file=sys.stderr)
@@ -714,37 +716,9 @@ def _letterbox(img, imgsz: int):
 
 
 def _resolve_val_image_paths(yaml_path: str) -> list[str]:
-    """Parse a ultralytics-style dataset yaml and return absolute val image
-    paths. Keeps the resolution logic in one place so callers don't re-implement
-    the ``path`` + ``val`` relative-path dance."""
-    import yaml as yaml_mod
-
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        spec = yaml_mod.safe_load(f)
-    root = Path(spec["path"])
-    val_rel = spec["val"]
-    val_target = (root / val_rel) if not Path(val_rel).is_absolute() else Path(val_rel)
-
-    # ultralytics datasets commonly declare val either as (a) a .txt listing file
-    # (COCO convention) or (b) a directory of images (YOLOv5+ convention). Support
-    # both so the same calibration path works for COCO and custom datasets.
-    paths: list[str] = []
-    if val_target.is_dir():
-        exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-        for p in sorted(val_target.rglob("*")):
-            if p.suffix.lower() in exts:
-                paths.append(str(p.resolve()))
-        return paths
-
-    with open(val_target, "r", encoding="utf-8") as f:
-        lines = [ln.strip() for ln in f if ln.strip()]
-
-    for ln in lines:
-        p = Path(ln)
-        if not p.is_absolute():
-            p = (root / ln).resolve()
-        paths.append(str(p))
-    return paths
+    """Thin alias for :func:`scripts._split.resolve_val_image_paths`.
+    Kept for backwards compat with callers below; prefer the shared helper."""
+    return _split.resolve_val_image_paths(yaml_path)
 
 
 def _make_coco_calibrator(shape, n_samples: int, cache_path: Path, seed: int,
@@ -929,7 +903,7 @@ def _build_engine(
             print("[info] INT8+FP16: QDQ-preapplied ONNX (no calibrator)", file=sys.stderr)
         else:
             cache_file = engine_path.with_suffix(".calib")
-            val_yaml = os.environ.get("OMNI_COCO_YAML")
+            val_yaml = _split.calib_yaml()
             calibrator = None
             # Calibrator batch must match the optimization profile's batch,
             # otherwise TRT rejects the calibration shape on engine build
@@ -1223,7 +1197,12 @@ def run(recipe_path: str, out_path: str) -> int:
                     raise RuntimeError("no bs=1 engine available for mAP eval")
                 eng_for_val = matches[-1]
             m = YOLO(str(eng_for_val))
-            data_yaml = os.environ.get("OMNI_COCO_YAML", "coco.yaml")
+            data_yaml = _split.eval_yaml(
+                os.environ.get("OMNI_COCO_YAML", "coco.yaml"),
+                calib_yaml_path=_split.calib_yaml(),
+                calib_seed=recipe.technique.calibration_seed or 42,
+                calib_n=recipe.technique.calibration_samples or 512,
+            )
             metrics = m.val(data=data_yaml, imgsz=imgsz, batch=1, device=0,
                             plots=False, verbose=False)
             acc = AccuracyStats(

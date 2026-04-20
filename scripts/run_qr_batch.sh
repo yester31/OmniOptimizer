@@ -4,6 +4,7 @@
 set -u
 
 export OMNI_COCO_YAML="$PWD/qr_barcode.yaml"
+export OMNI_CALIB_YAML="$PWD/coco_val_only.yaml"    # calib on COCO (QR val has only 133 imgs)
 export OMNI_WEIGHTS_OVERRIDE="$PWD/best_qr.pt"
 
 mkdir -p results_qr

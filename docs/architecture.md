@@ -27,9 +27,10 @@ a bank of (runtime × technique) recipes end-to-end, then recommends the best on
     byte-identical ONNX to percentile. GPTQ dropped — requires Brevitas
     graph-mode, which fx-traces YOLO26n and fails on ultralytics' Python-flow
     forward.
-  - **Parked**: #07 trt_int8_sparsity, #11 modelopt_sparsity, #19 inc_int8_qat
-    (need training pipeline); #22 brevitas_int8_entropy (no supporting
-    observer in Brevitas 0.10.x).
+  - **Parked**: #07 trt_int8_sparsity, #11 modelopt_sparsity (need training
+    pipeline); #22 brevitas_int8_entropy (no supporting observer in
+    Brevitas 0.10.x). `#19 inc_int8_qat` was dropped, not parked — INC
+    backend was removed in Wave 3 (9d064ca).
 - **Metrics**: p50/p95/p99 latency (wall-clock + CUDA Event GPU-only), fps (bs=1, 8),
   peak GPU mem (torch + NVML delta), mAP@0.5 / mAP@0.5-0.95, model size, cold-start.
 
@@ -70,7 +71,7 @@ that keeps drifting) justifies it.
 
 ```bash
 # End-to-end: run all active recipes and emit report.md
-# (21 defined; #7/#11/#19/#22 parked, so `make all` runs 18.)
+# (21 defined; #7/#11/#22 parked, so `make all` runs 18.)
 make all
 
 # One recipe at a time

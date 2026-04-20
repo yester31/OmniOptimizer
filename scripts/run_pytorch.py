@@ -138,6 +138,8 @@ def run(recipe_path: str, out_path: str) -> int:
                 batch=1,
                 device=0 if device == "cuda" else "cpu",
                 half=(recipe.runtime.dtype == "fp16"),
+                calib_seed=recipe.technique.calibration_seed or 42,
+                calib_n=recipe.technique.calibration_samples or 512,
             )
         except Exception as e:
             print(f"[warn] accuracy eval failed: {e}", file=sys.stderr)

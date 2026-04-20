@@ -1,7 +1,7 @@
 {
   "recipe": "ort_cuda_fp16",
-  "started_at": "2026-04-18T12:31:30.604040+00:00",
-  "finished_at": "2026-04-18T12:33:32.358010+00:00",
+  "started_at": "2026-04-18T13:55:15.797057+00:00",
+  "finished_at": "2026-04-18T13:57:34.474663+00:00",
   "env": {
     "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
     "gpu_compute_capability": "8.6",
@@ -17,20 +17,20 @@
   },
   "model_size_mb": 4.742040634155273,
   "latency_ms": {
-    "p50": 270.6364999903599,
-    "p95": 402.08650002168724,
-    "p99": 423.4293010047986,
+    "p50": 314.61339999805205,
+    "p95": 376.04209001583513,
+    "p99": 382.34227600332815,
     "p50_gpu": null,
     "p95_gpu": null,
     "p99_gpu": null
   },
   "throughput_fps": {
-    "bs1": 3.694993099732003,
+    "bs1": 3.178504157820969,
     "bs8": null
   },
   "peak_gpu_mem_mb": null,
   "peak_gpu_mem_mb_nvml_delta": null,
-  "cold_start_ms": 469.06699999817647,
+  "cold_start_ms": 672.6607000164222,
   "accuracy": {
     "map_50": 0.9893191399844994,
     "map_50_95": 0.9334225112132678

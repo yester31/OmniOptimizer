@@ -17,6 +17,7 @@ import os
 from typing import Callable, Optional
 
 from ._schemas import AccuracyStats
+from . import _split
 
 
 def _coco_yaml() -> str:
@@ -33,6 +34,8 @@ def evaluate_via_ultralytics(
     imgsz: int = 640,
     device: str | int = 0,
     half: bool = False,
+    calib_seed: int = 42,
+    calib_n: int = 512,
 ) -> AccuracyStats:
     """Runs ultralytics' built-in COCO val.
 
@@ -42,8 +45,12 @@ def evaluate_via_ultralytics(
     from ultralytics import YOLO
 
     model = YOLO(weights)
+    eval_yaml_path = _split.eval_yaml(
+        _coco_yaml(), calib_yaml_path=_split.calib_yaml(),
+        calib_seed=calib_seed, calib_n=calib_n,
+    )
     metrics = model.val(
-        data=_coco_yaml(),
+        data=eval_yaml_path,
         imgsz=imgsz,
         batch=batch,
         device=device,
