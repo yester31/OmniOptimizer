@@ -43,14 +43,29 @@ from scripts.measure import (  # noqa: E402
 )
 from scripts import _split  # noqa: E402
 
+# Module-level override set by run() when _resolve_weights returns a YOLO
+# instance (modelopt_sparsify / modelopt_qat). Reset to None after run()
+# completes to prevent state leaking between unit-test invocations.
+_MAIN_TRAINED_YOLO = None  # type: ignore[var-annotated]
 
-def _resolve_weights(recipe: Recipe) -> str:
-    """Return the weights path for runner consumption.
 
-    If the recipe has ``technique.training``, prefer ``trained_weights/{name}.pt``
-    produced by ``scripts/train.py``. Currently returns a plain path for
-    ``prune_24`` modifier (state_dict is ultralytics-compatible). Modelopt
-    modifiers (sparsify/qat) need additional restore — see Task 8.
+def _load_yolo_for_restore(base_path: str):
+    """Load a plain YOLO instance to serve as the architecture skeleton
+    for mto.restore()."""
+    from ultralytics import YOLO
+    return YOLO(base_path)
+
+
+def _resolve_weights(recipe: Recipe):
+    """Return runner input: either a path string, or a YOLO-like object
+    whose ``.model`` has modelopt modules restored.
+
+    - No training: str path (recipe.model.weights).
+    - prune_24 trained: str path to trained_weights/{name}.pt (plain
+      ultralytics checkpoint after prune.remove()).
+    - modelopt_sparsify / modelopt_qat: YOLO instance with mto.restore()
+      applied; downstream _export_onnx accepts YOLO objects directly
+      (see the ``is_path`` branch near line 70).
     """
     if recipe.technique.training is None:
         return recipe.model.weights
@@ -64,10 +79,21 @@ def _resolve_weights(recipe: Recipe) -> str:
     modifier = recipe.technique.training.modifier
     if modifier == "prune_24":
         return str(trained)
-    # modelopt_sparsify / modelopt_qat handled in Task 8
-    raise NotImplementedError(
-        f"_resolve_weights for modifier={modifier!r} not wired yet"
-    )
+    if modifier in ("modelopt_sparsify", "modelopt_qat"):
+        import modelopt.torch.opt as mto
+        yolo = _load_yolo_for_restore(recipe.model.weights)
+        mto.restore(yolo.model, str(trained))
+        return yolo
+    raise RuntimeError(f"unexpected modifier: {modifier!r}")
+
+
+def _get_weights_or_yolo(recipe: Recipe):
+    """Return _MAIN_TRAINED_YOLO if set (modelopt trained), else recipe.model.weights.
+
+    Call sites that accept both str paths and YOLO instances (e.g. _export_onnx)
+    should use this helper to transparently pick up a restored modelopt model.
+    """
+    return _MAIN_TRAINED_YOLO if _MAIN_TRAINED_YOLO is not None else recipe.model.weights
 
 
 def _seed_all(seed: int) -> None:
@@ -196,12 +222,18 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         return cached
 
     if recipe.technique.sparsity_preprocess == "2:4":
-        yolo = _apply_modelopt_sparsify(recipe.model.weights, imgsz)
+        # For modelopt trained recipes, _get_weights_or_yolo() returns the
+        # already-restored YOLO; _apply_modelopt_sparsify expects a str path,
+        # so fall through to the plain weights when a trained YOLO is present.
+        if _MAIN_TRAINED_YOLO is not None:
+            yolo = _MAIN_TRAINED_YOLO
+        else:
+            yolo = _apply_modelopt_sparsify(recipe.model.weights, imgsz)
         clean_onnx = _export_onnx(yolo, imgsz, half=False,
                                   cache_dir=cache_dir, dynamic=dynamic,
                                   tag_suffix="_sparse24")
     else:
-        clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
+        clean_onnx = _export_onnx(_get_weights_or_yolo(recipe), imgsz, half=False,
                                   cache_dir=cache_dir, dynamic=dynamic)
 
     samples = recipe.technique.calibration_samples or 512
@@ -307,7 +339,7 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         print(f"[info] ort_quant cache hit: {cached.name}", file=sys.stderr)
         return cached
 
-    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
+    clean_onnx = _export_onnx(_get_weights_or_yolo(recipe), imgsz, half=False,
                               cache_dir=cache_dir, dynamic=dynamic)
 
     # ORT's quantize_static recommends running shape inference + model
@@ -482,7 +514,7 @@ def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
 
     from ultralytics import YOLO
 
-    yolo = YOLO(recipe.model.weights)
+    yolo = _MAIN_TRAINED_YOLO if _MAIN_TRAINED_YOLO is not None else YOLO(recipe.model.weights)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     yolo.model = yolo.model.to(device).eval()
 
@@ -711,7 +743,7 @@ def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     source = recipe.technique.source
     dynamic = bs > 1
     if source == "trt_builtin":
-        path = _export_onnx(recipe.model.weights, imgsz, half=False,
+        path = _export_onnx(_get_weights_or_yolo(recipe), imgsz, half=False,
                             cache_dir=cache_dir, dynamic=dynamic)
         return path, False
     if source == "modelopt":
@@ -1090,8 +1122,18 @@ def _make_trt_forward(engine_path: Path, batch_size: int, imgsz: int):  # pragma
 
 
 def run(recipe_path: str, out_path: str) -> int:
+    global _MAIN_TRAINED_YOLO
     recipe: Recipe = load_recipe(recipe_path)
     _seed_all(recipe.measurement.seed)
+
+    # spec §6 / Task 8: resolve weights. May return YOLO instance for
+    # modelopt trained recipes; downstream call sites use _get_weights_or_yolo().
+    _MAIN_TRAINED_YOLO = None
+    resolved = _resolve_weights(recipe)
+    if isinstance(resolved, (str, Path)):
+        recipe.model.weights = str(resolved)
+    else:
+        _MAIN_TRAINED_YOLO = resolved
 
     env = collect_env()
     clock_note = lock_gpu_clock(recipe.measurement.gpu_clock_lock)
@@ -1264,6 +1306,7 @@ def run(recipe_path: str, out_path: str) -> int:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(json.loads(result.model_dump_json()), f, indent=2)
     print(f"wrote {out_path}")
+    _MAIN_TRAINED_YOLO = None  # reset to prevent state leak between test runs
     return 0
 
 

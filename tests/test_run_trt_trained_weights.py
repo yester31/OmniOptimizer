@@ -49,3 +49,44 @@ def test_resolve_weights_prune_24_returns_trained_path(tmp_path, monkeypatch):
     ))
     result = run_trt._resolve_weights(recipe)
     assert Path(result) == trained
+
+
+def test_resolve_weights_modelopt_returns_yolo_like(tmp_path, monkeypatch):
+    """For modelopt_* modifier, _resolve_weights returns a YOLO instance
+    (not a string path) so downstream _export_onnx can consume it."""
+    import torch.nn as nn
+
+    modelopt_torch_opt = pytest.importorskip("modelopt.torch.opt")
+    modelopt_torch_quantization = pytest.importorskip("modelopt.torch.quantization")
+
+    from scripts import run_trt
+    monkeypatch.setattr(run_trt, "ROOT", tmp_path)
+    tw = tmp_path / "trained_weights"
+    tw.mkdir()
+    trained = tw / "test_recipe.pt"
+
+    # Create a minimal modelopt-savable checkpoint
+    m = nn.Sequential(nn.Conv2d(3, 8, 3), nn.ReLU())
+    modelopt_torch_quantization.quantize(m, modelopt_torch_quantization.INT8_DEFAULT_CFG)
+    modelopt_torch_opt.save(m, str(trained))
+
+    recipe = _make_recipe(
+        training=TrainingSpec(
+            base_checkpoint="yolo26n.pt",
+            epochs=5,
+            modifier="modelopt_qat",
+        ),
+        weights="yolo26n.pt",
+    )
+
+    class _FakeYolo:
+        def __init__(self, path):
+            self.model = nn.Sequential(nn.Conv2d(3, 8, 3), nn.ReLU())
+            self.ckpt_path = path
+
+    def fake_yolo(path):
+        return _FakeYolo(path)
+
+    monkeypatch.setattr(run_trt, "_load_yolo_for_restore", fake_yolo)
+    out = run_trt._resolve_weights(recipe)
+    assert hasattr(out, "model")  # YOLO-like
