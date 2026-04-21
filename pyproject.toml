@@ -38,14 +38,21 @@ brevitas = [
     "brevitas>=0.11",
 ]
 modelopt = ["nvidia-modelopt>=0.15"]
+cpu = [
+    "openvino>=2024.3",
+    "nncf>=2.9,<3.0",
+    "psutil>=5.9",
+    "py-cpuinfo>=9.0",
+]
 all = [
-    "omnioptimizer[torch,onnx,trt,brevitas,modelopt]",
+    "omnioptimizer[torch,onnx,trt,brevitas,modelopt,cpu]",
 ]
 
 [project.scripts]
 omni-run-pytorch = "scripts.run_pytorch:main"
 omni-run-ort = "scripts.run_ort:main"
 omni-run-trt = "scripts.run_trt:main"
+omni-run-cpu = "scripts.run_cpu:main"
 omni-recommend = "scripts.recommend:main"
 
 [tool.setuptools]

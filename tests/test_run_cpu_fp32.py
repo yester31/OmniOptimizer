@@ -74,13 +74,23 @@ def test_dispatch_ort_cpu_fp32_creates_ort_session(tmp_path, monkeypatch):
     assert session == "stub_session"
 
 
-def test_dispatch_openvino_raises_not_implemented():
-    """OpenVINO path is Task 5 territory."""
+def test_dispatch_openvino_fp32_routes_to_openvino_handler(monkeypatch):
+    """source=openvino + dtype=fp32 → _prepare_openvino_fp32 (Task 5 live).
+    Full dispatcher test lives in test_run_cpu_openvino.py; this is the
+    fp32-sibling guard so the three CPU-source tests in this file stay
+    symmetric (ort_cpu fp32 / openvino fp32 / unknown source)."""
     from scripts import run_cpu
 
+    called = {"branch": None}
+
+    def fake_ov(recipe_):
+        called["branch"] = "openvino_fp32"
+        return "stub"
+
+    monkeypatch.setattr(run_cpu, "_prepare_openvino_fp32", fake_ov)
     recipe = _make_recipe(source="openvino", dtype="fp32", engine="openvino")
-    with pytest.raises(NotImplementedError, match="Task 5"):
-        run_cpu._prepare_cpu_session(recipe)
+    run_cpu._prepare_cpu_session(recipe)
+    assert called["branch"] == "openvino_fp32"
 
 
 def test_dispatch_bf16_skips_when_cpu_lacks_bf16_and_amx(monkeypatch):

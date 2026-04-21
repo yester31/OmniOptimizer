@@ -407,6 +407,193 @@ def _prepare_ort_cpu_int8_static(recipe: Recipe, session_options_factory: Callab
     return session, input_name, output_names, cold_ms, int8_onnx
 
 
+# ---------------------------------------------------------------------------
+# OpenVINO paths (Task 5)
+# ---------------------------------------------------------------------------
+
+_OV_CORE: Any = None  # openvino.Core singleton, lazy-initialized
+
+
+def _get_ov_core():
+    """Return a cached ``openvino.Core`` — creating one costs ~300ms and
+    reinitializing per recipe dominates cold_start_ms in batch runs."""
+    global _OV_CORE
+    if _OV_CORE is None:
+        import openvino as ov
+        _OV_CORE = ov.Core()
+    return _OV_CORE
+
+
+class OVRunnerAsORT:
+    """Minimal adapter that makes an ``openvino.CompiledModel`` quack like
+    ``onnxruntime.InferenceSession`` — just enough surface for
+    ``measure_latency``'s forward closure and ``run_cpu.run()``'s
+    output-name collection:
+
+      - ``.run(output_names, {input_name: ndarray}) -> list[ndarray]``
+      - ``.get_inputs()[i].name``
+      - ``.get_outputs()[i].name``
+
+    Does NOT implement full ORT surface (no ``io_binding``, no
+    ``get_providers``, etc.) — only the calls the CPU runner and the
+    shared measurement utilities actually make.
+    """
+
+    class _NamedPort:
+        def __init__(self, name: str):
+            self.name = name
+
+    def __init__(self, compiled, input_name: str, output_names: list[str]):
+        self._compiled = compiled
+        self._input_name = input_name
+        self._output_names = list(output_names)
+
+    def run(self, output_names, input_dict):
+        x = input_dict[self._input_name]
+        result = self._compiled([x])
+        # OV returns {Output: ndarray}; index by positional output port so
+        # order matches self._output_names (what run_cpu captured at session
+        # creation). Requested output_names is honored only by position —
+        # OV IR and ONNX may rename outputs but positional alignment holds.
+        return [result[self._compiled.output(i)]
+                for i in range(len(self._output_names))]
+
+    def get_inputs(self):
+        return [OVRunnerAsORT._NamedPort(self._input_name)]
+
+    def get_outputs(self):
+        return [OVRunnerAsORT._NamedPort(n) for n in self._output_names]
+
+
+def _openvino_perf_hint(bs: int) -> str:
+    """OpenVINO PERFORMANCE_HINT by batch size. bs=1 → LATENCY pins a single
+    inference stream; bs>1 → THROUGHPUT opens multiple streams to saturate
+    the CPU. This is the "fair" comparison call-out in the Wave 6 plan."""
+    return "LATENCY" if bs == 1 else "THROUGHPUT"
+
+
+def _compile_openvino(ov_model, recipe: Recipe, bs: int):
+    """Shared compile_model invocation with hint + thread count applied."""
+    core = _get_ov_core()
+    config = {
+        "PERFORMANCE_HINT": _openvino_perf_hint(bs),
+    }
+    nthreads = _resolve_thread_count(recipe)
+    # INFERENCE_NUM_THREADS accepts a string per OV 2024.x docs.
+    config["INFERENCE_NUM_THREADS"] = str(nthreads)
+    return core.compile_model(ov_model, "CPU", config)
+
+
+def _prepare_openvino_fp32(recipe: Recipe):
+    """Read FP32 ONNX into an OpenVINO model, save the IR (so re-runs reuse
+    it), compile for CPU with the batch-size-appropriate performance hint,
+    and wrap as an ORT-compatible runner.
+
+    Returns (runner, input_name, output_names, cold_ms, onnx_path) — same
+    tuple shape as the ORT paths so run() doesn't branch on backend.
+    """
+    import openvino as ov
+
+    weights = _resolve_weights(recipe)
+    imgsz = recipe.measurement.input_size
+    onnx_cache = Path("results_cpu/_onnx")
+    ir_cache = Path("results_cpu/_ov_ir")
+    ir_cache.mkdir(parents=True, exist_ok=True)
+
+    onnx_path = _export_onnx(weights, imgsz, half=False, cache_dir=onnx_cache,
+                             dynamic=True)
+    ir_xml = ir_cache / f"{recipe.name}_fp32.xml"
+
+    def _load():
+        core = _get_ov_core()
+        if ir_xml.exists():
+            ov_model = core.read_model(str(ir_xml))
+        else:
+            ov_model = core.read_model(str(onnx_path))
+            ov.save_model(ov_model, str(ir_xml))
+        # Pick the first batch size the recipe mentions to compile; the
+        # outer run loop re-enters with other batch sizes as needed. Most
+        # recipes list [1, 8] and we want the bs=1 LATENCY-hint path
+        # represented in cold_start_ms.
+        first_bs = recipe.measurement.batch_sizes[0]
+        compiled = _compile_openvino(ov_model, recipe, first_bs)
+        return ov_model, compiled
+
+    (ov_model, compiled), cold_ms = measure_cold_start(_load)
+
+    input_name = ov_model.inputs[0].get_any_name()
+    output_names = [o.get_any_name() for o in ov_model.outputs]
+    runner = OVRunnerAsORT(compiled, input_name, output_names)
+    return runner, input_name, output_names, cold_ms, onnx_path
+
+
+def _prepare_openvino_int8_nncf(recipe: Recipe):
+    """NNCF post-training quantization on OpenVINO FP32 IR, then compile the
+    quantized IR for CPU. Spike (#R1 CLEARED 2026-04-21) showed the default
+    MIXED preset handles YOLO26n attention blocks without an ignored_scope
+    override — so none is added here. If a future model regresses, the
+    escape hatch is recipe.technique.nodes_to_exclude (already schema'd).
+
+    Accuracy eval on INT8 OV IR requires ultralytics val adapter work that
+    is out of Wave 6 scope — returned onnx_path is the FP32 baseline, and
+    run() records a notes marker when it detects the mismatch (Task 10
+    follow-up).
+    """
+    import nncf
+    import openvino as ov
+
+    weights = _resolve_weights(recipe)
+    imgsz = recipe.measurement.input_size
+    onnx_cache = Path("results_cpu/_onnx")
+    ir_cache = Path("results_cpu/_ov_ir")
+    ir_cache.mkdir(parents=True, exist_ok=True)
+
+    onnx_path = _export_onnx(weights, imgsz, half=False, cache_dir=onnx_cache,
+                             dynamic=True)
+    int8_xml = ir_cache / f"{recipe.name}_int8.xml"
+
+    def _load():
+        core = _get_ov_core()
+        if int8_xml.exists():
+            ov_int8 = core.read_model(str(int8_xml))
+        else:
+            ov_fp32 = core.read_model(str(onnx_path))
+            # Streaming calibration generator — NNCF accepts any iterable
+            # of transform_func(sample) outputs; we already produce
+            # (1, 3, H, W) np.float32 arrays so transform is identity.
+            val_yaml = (
+                os.environ.get("OMNI_CALIB_YAML")
+                or os.environ.get("OMNI_COCO_YAML")
+                or recipe.technique.calibration_dataset
+            )
+            n_samples = recipe.technique.calibration_samples or 300
+            seed = (recipe.technique.calibration_seed
+                    or recipe.measurement.seed or 42)
+
+            def _sample_gen():
+                yield from _iter_calib_samples(val_yaml, n_samples, imgsz, seed)
+
+            calib = nncf.Dataset(_sample_gen(), transform_func=lambda x: x)
+            ov_int8 = nncf.quantize(
+                ov_fp32,
+                calib,
+                preset=nncf.QuantizationPreset.MIXED,
+                target_device=nncf.TargetDevice.CPU,
+                subset_size=n_samples,
+            )
+            ov.save_model(ov_int8, str(int8_xml))
+        first_bs = recipe.measurement.batch_sizes[0]
+        compiled = _compile_openvino(ov_int8, recipe, first_bs)
+        return ov_int8, compiled
+
+    (ov_int8, compiled), cold_ms = measure_cold_start(_load)
+
+    input_name = ov_int8.inputs[0].get_any_name()
+    output_names = [o.get_any_name() for o in ov_int8.outputs]
+    runner = OVRunnerAsORT(compiled, input_name, output_names)
+    return runner, input_name, output_names, cold_ms, onnx_path
+
+
 def _prepare_cpu_session(recipe: Recipe):
     """Dispatcher on (source, dtype). Returns session object; structure
     depends on backend."""
@@ -444,9 +631,13 @@ def _prepare_cpu_session(recipe: Recipe):
             "model conversion required; tracked in Wave 7 roadmap)."
         )
     if source == "openvino":
+        if dtype == "fp32":
+            return _prepare_openvino_fp32(recipe)
+        if dtype == "int8":
+            return _prepare_openvino_int8_nncf(recipe)
         raise NotImplementedError(
-            "openvino source: implemented by Task 5 "
-            "(OpenVINO runtime + NNCF INT8 PTQ)"
+            f"openvino + dtype={dtype!r}: only fp32 and int8 are supported "
+            "in Wave 6 (bf16 / fp16 defer to Wave 7)."
         )
 
     raise RuntimeError(
