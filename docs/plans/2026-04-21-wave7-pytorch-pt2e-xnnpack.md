@@ -302,13 +302,32 @@ ONNX → TFLite 변환기 자체가 제거됐으므로 무관. XNNPACK은 ORT가
 
 ---
 
-## Extension Gates (Wave 8+ candidates)
+## Extension Gates (Wave 8+ roadmap)
 
-- **ExecutorTorch** — PT2E 결과물(`.pte`) 모바일 배포. Wave 7 PT2E 산출물 재사용 가능.
-- **ncnn** — 모바일 배포 표준. 개발은 Wave 7에서 미뤘지만 Android/iOS YOLO 생태계 표준.
-- **Apple Core ML EP** — M-series Neural Engine offload.
-- **ORT XNNPACK on ARM** — Raspberry Pi 5 / Graviton / Apple M 테스트.
-- **AMD Ryzen AI NPU** — Windows 전용 NPU delegate (ONNX Runtime DirectML EP 경유).
+평가 완료된 후보군(2026-04-21 검토):
+- **MNN (Alibaba)** — **EXCLUDED**. ncnn과 기능 중복, 영어 문서 얇음, 특별 차별점 없음.
+- **ExecutorTorch (Meta)** — **EXCLUDED** (2026 현재 alpha). PT2E(#41)가 이미 "PyTorch native 양자화" 목적 달성하므로 추가 가치 낮음. 2027+에 성숙도 재평가 후 재검토.
+
+### Wave 8 (planned) — ncnn 모바일 편입
+- ncnn은 **YOLO 모바일 배포의 사실상 표준** (YOLOv5/v8/NAS/26n 공식 예제 다수, ~500KB 런타임)
+- 신규 recipe `#50 ncnn_fp32`, `#51 ncnn_int8_ptq`, (선택) `#52 ncnn_vulkan_fp16` — 번호 점프(#44-#49 buffer)로 hardware family 전환 시각화
+- 파이프라인: ONNX → `onnx2ncnn` → `.param` + `.bin` → `ncnn.Net.load_param` + Python API로 forward
+- 어댑터 `NcnnAsORT` — Wave 6 `OVRunnerAsORT` 패턴 재사용
+- 리스크: `onnx2ncnn`의 YOLO26n attention block 호환 (Wave 3 INC / Wave 6 R2와 유사) — Task 0 spike 필요
+- Mobile build는 Wave 8 범위 밖 (Android/iOS CI는 별도 인프라, Wave 10+)
+
+### Wave 9 (planned) — DirectML EP (Windows Edge 전용)
+- Windows 10/11 + DirectX 12 환경에서 **AMD Ryzen AI NPU**, **Intel Arc GPU**, **NVIDIA GPU**를 단일 API로 접근
+- 설치는 단순(`pip install onnxruntime-directml` 한 줄) — 그러나 **`onnxruntime` 패키지와 상호배타**. 기존 Wave 6/7 경로 깨뜨리지 않으려면 **별도 venv** 필수
+- 신규 recipe `#60 dml_fp32`, `#61 dml_fp16`, `#62 dml_int8` — provider `DmlExecutionProvider`
+- 이식성 트레이드오프: Linux/macOS 완전 미지원 → Wave 9를 **Windows edge 전용 wave**로 분리 정책
+- 리스크: ORT DirectML이 QDQ INT8을 DML로 실행하는지, CPU fallback 발생 정도 — spike 필요
+
+### 더 먼 후보 (Wave 10+)
+- **Apple Core ML EP** — M-series Neural Engine offload. ORT에 EP로 붙음.
+- **ORT XNNPACK on ARM** — Raspberry Pi 5 / Graviton / Apple M 테스트 베드 확보 후.
+- **ExecutorTorch** — 2027+ API 안정 시 `#50 executorch_int8_x86` 같은 단일 recipe로 재평가.
+- **INT4 weight-only** — Vision 연구 검증 시점.
 
 ---
 
