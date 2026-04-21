@@ -110,13 +110,22 @@ Task 1 (schema)      ├── Task 2 (pt2e handler — #40 fp32, #41 int8)
   - `X86InductorQuantizer` + `prepare_pt2e` + 1 sample calibrate + `convert_pt2e`
   - 1 forward로 출력 shape `(1,300,6)` 보존 확인
 - [ ] **Step 4: `torch.compile` latency**
-  - `compiled = torch.compile(quantized_module, mode="reduce-overhead")`
+  - `compiled = torch.compile(quantized_module)` — **CPU 경로 기본 mode 사용**.
+    `mode="reduce-overhead"`는 CUDA graph 기반이라 CPU에선 무의미 또는 역효과.
+    공격적 탐색이 필요하면 `mode="max-autotune-no-cudagraphs"` 옵션.
   - 1 forward → 첫 호출 시간 (cold_start 수치 참고치)
-- [ ] **Step 5: Verdict**
-  - 3단계 모두 PASS → Wave 7 CLEARED, 전체 task 진행
+- [ ] **Step 5: XNNPACK QDQ fallback 실기 확인 (R5)**
+  - `import onnxruntime as ort; ort.get_available_providers()` — `XnnpackExecutionProvider` 포함 확인
+  - Wave 6 static INT8 캐시(`results_cpu/_onnx/ort_cpu_int8_static_*.onnx`) 중 아무거나 `providers=["XnnpackExecutionProvider", "CPUExecutionProvider"]`로 로드
+  - 1 forward → 출력 shape 보존 확인
+  - `session.get_providers()` 반환이 XNNPACK을 실제 assign했는지 / CPU로 전부 떨어졌는지 기록
+  - **목적**: fallback이 100%면 #43 recipe는 `ort_cpu_int8_static`과 동일해짐 → Wave 7 implementation 전에 재양자화 (Task 3 Step 5b) 필요성 판정
+- [ ] **Step 6: Verdict**
+  - 4단계 모두 PASS → Wave 7 CLEARED, 전체 task 진행
   - Step 2 실패 → **PT2E 전체 parked**, Wave 7을 XNNPACK 단독(#42/#43)으로 축소
   - Step 3 실패 (export OK / quantize 깨짐) → PT2E INT8(#41) parked, FP32(#40)만 유지
-- [ ] **Step 6: Commit** — `docs(plans): Wave 7 R3 spike results`
+  - Step 5 fallback 100% → Task 3 Step 5b 재양자화 의무화 (skip 불가)
+- [ ] **Step 7: Commit** — `docs(plans): Wave 7 R3/R5 spike results`
 
 ---
 
@@ -152,10 +161,12 @@ Task 1 (schema)      ├── Task 2 (pt2e handler — #40 fp32, #41 int8)
   from ultralytics import YOLO
   model = YOLO(weights).model.eval().to("cpu")
   example = torch.randn(1, 3, imgsz, imgsz)
-  exported = torch.export.export(model, (example,))
-  compiled = torch.compile(exported.module(), mode="reduce-overhead")
   with torch.no_grad():
-      _ = compiled(example)  # lazy compile trigger
+      exported = torch.export.export(model, (example,))
+      # CPU inference uses inductor default mode. `reduce-overhead` is
+      # CUDA-graph-based and produces no speedup (often slower) on CPU.
+      compiled = torch.compile(exported.module())
+      _ = compiled(example)  # lazy compile trigger — first call is slow
   return PytorchPT2EAsORT(compiled, "images", ["output0"])
   ```
 - [ ] **Step 4: `_prepare_pytorch_pt2e_int8_x86`**
@@ -167,13 +178,20 @@ Task 1 (schema)      ├── Task 2 (pt2e handler — #40 fp32, #41 int8)
   quantizer = X86InductorQuantizer()
   quantizer.set_global(get_default_x86_inductor_quantization_config())
   prepared = prepare_pt2e(exported.module(), quantizer)
+  # _iter_calib_samples yields (1, 3, H, W) float32 — batch dim matches
+  # the export example, so prepared.forward() accepts it directly.
   for x in _iter_calib_samples(val_yaml, n_samples=128, imgsz, seed):
-      prepared(torch.from_numpy(x))
+      with torch.no_grad():
+          prepared(torch.from_numpy(x))
   quantized = convert_pt2e(prepared)
-  compiled = torch.compile(quantized, mode="reduce-overhead")
+  compiled = torch.compile(quantized)  # CPU default mode, no reduce-overhead
   return PytorchPT2EAsORT(compiled, "images", ["output0"])
   ```
-- [ ] **Step 5: `PytorchPT2EAsORT` adapter** — Wave 6 `OVRunnerAsORT` 패턴 재사용. forward 결과 `torch.Tensor` → `.cpu().numpy()` 변환.
+  - **calibration_samples=128**: Wave 6 #33에서 Windows 페이징 제약으로 확정한 값.
+    Wave 7은 같은 호스트 상속이므로 128 유지. 메모리 여유 있는 호스트는 recipe에서 256으로 override 가능.
+- [ ] **Step 5: `PytorchPT2EAsORT` adapter** — Wave 6 `OVRunnerAsORT` 패턴 재사용.
+  - Forward: `torch.from_numpy(x)` → `compiled(...)` → `.cpu().numpy()` 변환
+  - `Result.notes`에 `pt2e_adapter: torch<->numpy conversion included in measured latency` 한 줄 기록해 다른 backend와 fairness 맥락을 report 해석 시 명시 (Wave 6 OV와 동일 overhead 포함 정책)
 - [ ] **Step 6: Dispatcher branches** in `_prepare_cpu_session` — `source == "pt2e"` 분기
 - [ ] **Step 7: Run tests → pass**
 - [ ] **Step 8: Commit** — `feat(run_cpu): Wave 7 Task 2 — PyTorch PT2E fp32 + x86 int8`
@@ -204,6 +222,14 @@ Task 1 (schema)      ├── Task 2 (pt2e handler — #40 fp32, #41 int8)
 - [ ] **Step 5: Static INT8 주의** — XNNPACK INT8은 ORT `QOperator` 포맷 선호, 현재 우리 static은 `QuantFormat.QDQ`. XNNPACK + QDQ 호환 확인:
   - ORT 1.17+에서 QDQ + XNNPACK EP는 fallback 동작 검증됨
   - 만약 XNNPACK이 INT8 Conv를 선택 안 하면 CPU EP로 떨어져 Wave 6 #33과 동일해짐 → notes에 기록
+- [ ] **Step 5b: #43 전용 재양자화 (Wave 6 #33 회귀 격리)**
+  - **Problem**: Wave 6 #33 (`ort_cpu_int8_static`)은 mAP=0 회귀가 확정된 ONNX. 같은 결과물을 XNNPACK EP에 투입하면 당연히 mAP=0이 나와 "XNNPACK이 유효한가" 판정 불가.
+  - **Solution**: #43은 **새 quantize_static ONNX**를 생성. Wave 6 #33과 다른 파라미터 조합으로 회귀 회피 시도:
+    - Option A: `activation_type=QuantType.QUInt8` (Wave 6은 QInt8) + `ActivationSymmetric=False` — per-tensor asymmetric activation
+    - Option B: `nodes_to_exclude`에 detect head의 `cv2.*`, `cv3.*` 추가 — 민감 레이어 FP 유지
+    - Option C: `DedicatedQDQPair=True` — Wave 6에서 False였던 플래그 flip
+  - 실기 smoke로 A/B/C 중 mAP 살아남는 첫 번째 조합 채택, 다른 것은 `docs/improvements/2026-04-21-wave7-int8-quant-debug.md`에 기록
+  - 결과 ONNX는 `results_cpu/_onnx/ort_cpu_xnnpack_int8_static.onnx`로 캐시 (Wave 6 #33 ONNX와 별도 파일)
 - [ ] **Step 6: Run tests → pass**
 - [ ] **Step 7: Commit** — `feat(run_cpu): Wave 7 Task 3 — ORT XNNPACK EP via execution_provider`
 
@@ -267,8 +293,14 @@ Task 1 (schema)      ├── Task 2 (pt2e handler — #40 fp32, #41 int8)
     - (B) PT2E가 앞섬 → "PyTorch native가 경쟁력", 추천 플립 검토
     - (C) 둘 다 크게 뒤짐 → Wave 7은 모바일/확장 발판 가치로만 유지
 - [ ] **Step 7**: Follow-up 정리
-  - Wave 6 #33 회귀 재시도 (XNNPACK INT8 경로로 해결되는지 확인 — bonus)
+  - Wave 6 #33 회귀 재시도 (Task 3 Step 5b에서 해결되는 조합이 생겼는지 정리)
   - R3 spike에서 발견된 torch.export 제약 문서화
+- [ ] **Step 7b**: Wave 8 ncnn feasibility micro-spike (시간 여유 시, 선택)
+  - `pip install ncnn` 가능 여부 (Windows wheel)
+  - `onnx2ncnn best_qr.onnx` 실행 → `.param` / `.bin` 파일 생성 확인 (YOLO26n attention block 호환 검증)
+  - `ncnn.Net.load_param`로 1 forward smoke — 출력 shape `(1, 300, 6)` 보존
+  - 결과(3단계 PASS/FAIL)를 `docs/improvements/2026-04-21-wave8-ncnn-feasibility.md`에 30줄 이내로 기록
+  - **목적**: Wave 8 착수 시점에 Task 0 전체를 재투자 않도록 핵심 R2-유형 리스크만 선행 검증
 - [ ] **Step 8: Commit results** — `feat(results): Wave 7 CPU eval + report (40-43)`
 
 ---
@@ -289,16 +321,16 @@ ONNX → TFLite 변환기 자체가 제거됐으므로 무관. XNNPACK은 ORT가
   - Worst case: PT2E는 Wave 8로 미루고 Wave 7을 2장 recipe로 축소 — 그래도 TFLite 없이는 이미 충분히 단순.
 
 ### R4. PT2E 양자화 그래프의 `torch.compile` 레이턴시
-**Risk**: `torch.compile(mode="reduce-overhead")`의 첫 호출이 수 초 걸릴 수 있음 — `cold_start_ms`가 FP32 baseline(~200ms)과 비교할 때 크게 튐.
-**Mitigation**: `measure_cold_start`가 이를 자연스럽게 기록. report.md는 `cold_start_ms`를 ranking 축에서 제외(Wave 6 결정)하므로 의사결정 영향 없음.
+**Risk**: `torch.compile` 첫 호출이 CPU에서도 수 초 걸릴 수 있음 — `cold_start_ms`가 FP32 baseline(~200ms)과 비교할 때 크게 튐. 또한 mode 선택을 잘못하면(예: `reduce-overhead`는 CUDA-graph 기반) CPU에서 오히려 느려짐.
+**Mitigation**: Task 2는 CPU 기본 mode(`torch.compile(module)`) 사용, `reduce-overhead`/`max-autotune-no-cudagraphs`는 옵션으로만 언급. `measure_cold_start`가 첫 호출 레이턴시를 자연스럽게 기록하고 report.md는 `cold_start_ms`를 ranking 축에서 제외(Wave 6 결정)하므로 의사결정 영향 없음.
 
-### R5. XNNPACK EP의 QDQ INT8 fallback
-**Risk**: Wave 7 recipe #43은 Wave 6 `quantize_static` 결과 ONNX(symmetric QDQ)를 그대로 XNNPACK EP로 로드. XNNPACK이 특정 노드에서 INT8 지원 안 하면 silently CPU EP로 떨어져 Wave 6 #33과 같은 성능 나옴.
-**Mitigation**: Task 7 Step 3 smoke에서 `session.get_provider_options()` 또는 `ort_session.get_session_options().log_severity_level=1`로 provider 실제 사용 로그 확인. 만약 fallback 대량 발생 시 notes에 `XNNPACK: partial fallback to CPU` 기록하고 속도 해석 주의.
+### R5. XNNPACK EP의 QDQ INT8 fallback (Task 0 Step 5에서 선행 검증)
+**Risk**: XNNPACK EP가 특정 QDQ 노드에서 INT8 지원 안 하면 silently CPU EP로 떨어져 Wave 6 #33과 같은 성능이 나옴.
+**Mitigation**: Task 0 Step 5가 Wave 6 static INT8 ONNX 하나를 XNNPACK EP로 로드해 `session.get_providers()` 반환값을 기록 — Wave 7 implementation 착수 전에 "fallback 100%인가 / 부분인가 / 전부 XNNPACK assign인가" 판정. Task 7 Step 3 smoke에서도 동일 확인을 recipe #43 결과에 notes로 기록.
 
-### R6. Wave 6 #33 mAP=0 회귀가 XNNPACK에서도 재현될 가능성
-**Risk**: 같은 `quantize_static` ONNX를 쓰므로 같은 activation scale 문제 발생 가능.
-**Mitigation**: Task 7에서 #43 mAP 확인. 동일하게 0 나오면 **양자화 자체 이슈**로 확정(provider 무관). Wave 6 follow-up 범위로 이관 — per-tensor activation 또는 nodes_to_exclude 실험.
+### R6. Wave 6 #33 mAP=0 회귀가 XNNPACK에서도 재현될 가능성 (Task 3 Step 5b로 격리)
+**Risk**: 같은 `quantize_static` ONNX를 재사용하면 activation scale 문제가 provider와 무관하게 재현.
+**Mitigation**: **#43은 Wave 6 #33 ONNX를 재사용하지 않는다** — Task 3 Step 5b에서 A/B/C 조합 중 mAP 살아남는 파라미터로 새 ONNX 생성. Wave 6 #33은 별도 Wave 9+ follow-up으로 이관하고, Wave 7 #43은 독립적인 INT8 경로로 취급.
 
 ---
 
@@ -318,7 +350,9 @@ ONNX → TFLite 변환기 자체가 제거됐으므로 무관. XNNPACK은 ORT가
 
 ### Wave 9 (planned) — DirectML EP (Windows Edge 전용)
 - Windows 10/11 + DirectX 12 환경에서 **AMD Ryzen AI NPU**, **Intel Arc GPU**, **NVIDIA GPU**를 단일 API로 접근
-- 설치는 단순(`pip install onnxruntime-directml` 한 줄) — 그러나 **`onnxruntime` 패키지와 상호배타**. 기존 Wave 6/7 경로 깨뜨리지 않으려면 **별도 venv** 필수
+- 설치는 단순(`pip install onnxruntime-directml` 한 줄). 단 기본 `onnxruntime` 패키지와 **패키지 슬롯 상호배타** — 공존 시나리오 두 가지:
+  - (권장) **별도 venv 분리** — Wave 6/7 환경과 독립 유지, 안정성 최고
+  - (옵션) **`pip install onnxruntime onnxruntime-directml --no-deps`** 후 런타임에 provider 스위칭 — 경험적으로 가능하나 공식 지원 아님. Wave 9 Task 0 spike에서 실기 확인 후 결정
 - 신규 recipe `#60 dml_fp32`, `#61 dml_fp16`, `#62 dml_int8` — provider `DmlExecutionProvider`
 - 이식성 트레이드오프: Linux/macOS 완전 미지원 → Wave 9를 **Windows edge 전용 wave**로 분리 정책
 - 리스크: ORT DirectML이 QDQ INT8을 DML로 실행하는지, CPU fallback 발생 정도 — spike 필요
@@ -344,10 +378,15 @@ Wave 7은 Wave 6의 다음 산출물에 **의존**:
 ## Success Criteria (Wave 7 "active" 선언 조건)
 
 1. **4장 recipe 전부 로드 가능** (`load_recipe` 통과)
-2. **최소 2장이 `meets_constraints=True`** (fp32 경로 2장 + int8 경로 1장 이상)
+2. **4장 중 3장 이상이 `meets_constraints=True`** — backend diversity 강제 포함 규칙:
+   - PT2E 최소 1장 success (#40 또는 #41)
+   - XNNPACK 최소 1장 success (#42 또는 #43)
+   - 합쳐서 ≥ 3장이면 "Wave 7 active" 선언
+   - 한 backend 전체가 park되면 Wave 7은 rescoped 상태로 기록 (수동 판단)
 3. **`torch.export` R3이 해소** — Task 0 Step 2에서 YOLO26n export 성공 확인
-4. **report에 10장(#30-#35 + #40-#43) 통합 ranking** — Wave 6 기준선 유지
-5. **추가 의존성 0** (`pyproject.toml` 변경 없음 확인)
-6. **`pytest tests/ -q` green** 유지
+4. **XNNPACK R5 실제 동작 확인** — Task 0 Step 5에서 `session.get_providers()` 반환에 XNNPACK이 assign됨을 실측
+5. **report에 10장(#30-#35 + #40-#43) 통합 ranking** — Wave 6 기준선 유지
+6. **추가 의존성 0** (`pyproject.toml` 변경 없음 확인)
+7. **`pytest tests/ -q` green** 유지 — 기존 105 pass + Wave 7 신규 테스트 추가분 모두 green
 
 Wave 6 benchmark: `openvino_int8_nncf` 23.9 fps(bs1). Wave 7 결과가 그 근처(±20%)면 "backend diversity 확보", 뚜렷이 앞서면 "추천 플립", 뒤처지면 "모바일 확장 발판" — Task 7 실측 후 확정.
