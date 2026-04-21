@@ -499,6 +499,7 @@ def run(recipe_path: str, out_path: str) -> int:
                     _forward,
                     warmup_iters=max(recipe.measurement.warmup_iters, 200),
                     measure_iters=max(recipe.measurement.measure_iters, 300),
+                    iter_cooldown_ms=recipe.measurement.iter_cooldown_ms,
                 )
                 per_bs[bs] = stats
             except Exception as e:
@@ -568,7 +569,7 @@ def run(recipe_path: str, out_path: str) -> int:
         finished_at=finished,
         env=EnvInfo(**{k: v for k, v in env.items() if k in EnvInfo.model_fields}),
         model_size_mb=None,
-        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99"}}),
+        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99", "stddev_ms"}}),
         throughput_fps=throughput,
         peak_gpu_mem_mb=None,  # CPU runner: no GPU memory to report
         cold_start_ms=cold_start_ms,

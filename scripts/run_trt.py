@@ -1164,7 +1164,7 @@ def run(recipe_path: str, out_path: str) -> int:
         finished_at=finished,
         env=env,  # type: ignore[arg-type]
         model_size_mb=None,
-        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99"}}),
+        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99", "stddev_ms"}}),
         throughput_fps=throughput,
         peak_gpu_mem_mb=peak_mem,
         cold_start_ms=cold_start_ms,

@@ -103,6 +103,11 @@ class MeasurementSpec(BaseModel):
     # hyperthreads," which typically regresses perf vs physical-core pinning.
     # See docs/plans/2026-04-21-wave6-cpu-inference.md Task 6 Step 3.
     thread_count: Optional[int] = Field(default=None, gt=0)
+    # Wave 6 Task 6: per-iteration sleep (ms) between forward passes in
+    # measure_latency. None → no cooldown (default). CPU recipes may opt
+    # in to absorb thermal throttle; GPU recipes leave this None to keep
+    # the hot path uncontaminated by sleep(). Negative values rejected.
+    iter_cooldown_ms: Optional[float] = Field(default=None, ge=0)
 
 
 class ConstraintSpec(BaseModel):
@@ -136,6 +141,11 @@ class LatencyStats(BaseModel):
     p50_gpu: Optional[float] = None
     p95_gpu: Optional[float] = None
     p99_gpu: Optional[float] = None
+    # Wave 6 Task 6: wall-clock stddev (ms) over the measurement window.
+    # CPU results dominate this metric's value — thermal / scheduler
+    # variance is larger on CPU than on GPU. Historical GPU JSONs keep
+    # stddev_ms=None; re-runs populate it automatically.
+    stddev_ms: Optional[float] = None
 
 
 class ThroughputStats(BaseModel):

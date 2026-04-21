@@ -132,6 +132,11 @@ def percentiles(samples_ms: list[float]) -> dict:
         "p50": float(np.percentile(arr, 50)),
         "p95": float(np.percentile(arr, 95)),
         "p99": float(np.percentile(arr, 99)),
+        # Wave 6 Task 6: population stddev over the measurement window.
+        # Useful for CPU recipes where thermal / scheduler jitter is the
+        # dominant noise source; on GPU it mostly reflects launch-overhead
+        # variance and is much smaller.
+        "stddev_ms": float(np.std(arr)),
     }
 
 
@@ -166,6 +171,7 @@ def measure_latency(
     forward_fn: Callable[[], object],
     warmup_iters: int,
     measure_iters: int,
+    iter_cooldown_ms: Optional[float] = None,
 ) -> dict:
     """Run ``forward_fn`` in a tight loop and return latency percentiles (ms).
 
@@ -173,12 +179,19 @@ def measure_latency(
     whole dict through to ``LatencyStats``/``Result`` without filtering):
 
     - ``p50`` / ``p95`` / ``p99``: wall-clock percentiles in ms (primary)
+    - ``stddev_ms``: population stddev of wall-clock samples (Wave 6 Task 6)
     - ``p50_gpu`` / ``p95_gpu`` / ``p99_gpu``: CUDA-event percentiles in ms,
       or ``None`` when CUDA/torch is not available
     - ``peak_gpu_mem_mb``: torch caching-allocator peak (``None`` if torch
       absent; NVML used-bytes fallback if NVML alone is present)
     - ``peak_gpu_mem_mb_nvml_delta``: NVML process-memory delta during the
       measurement window (``None`` if pynvml is unavailable)
+
+    ``iter_cooldown_ms`` (Wave 6 Task 6): when set, sleep this many ms
+    *after* each measured iteration. Off by default. CPU recipes may opt
+    in via ``MeasurementSpec.iter_cooldown_ms`` to blunt thermal throttle
+    between iters; GPU recipes should leave it off so wall-clock timing
+    isn't polluted by the sleep scheduling granularity.
 
     Runners that only forward the subset of keys they know about (legacy
     behaviour) still work — the new Optional fields simply stay ``None`` in
@@ -223,6 +236,10 @@ def measure_latency(
             _cuda_sync()
             wall_samples.append((time.perf_counter() - t0) * 1000.0)
         nvml_probe.sample()
+        if iter_cooldown_ms:
+            # Outside the timing window — intentional: we want to charge
+            # this sleep against real time, not record it as latency.
+            time.sleep(iter_cooldown_ms / 1000.0)
 
     stats: dict = percentiles(wall_samples)
     # Always include GPU keys so downstream consumers can rely on the shape;
