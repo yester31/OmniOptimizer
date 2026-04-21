@@ -9,13 +9,14 @@ code in this repository. Keep it short; detail lives in `docs/`.
 model + target GPU + constraints (max mAP drop, min fps); it runs a bank of
 (runtime × technique) recipes end-to-end and recommends the winner.
 
-Current scope: YOLO26n, one NVIDIA GPU, 18 recipes across 3 INT8 backends
-(`trt_builtin`, `modelopt`, `ort_quant`) plus FP32 / TF32 / FP16 variants.
+Current scope: YOLO26n, one NVIDIA GPU + x86_64 Intel CPU, 28 recipes across
+GPU (`trt_builtin`, `modelopt`, `ort_quant`, `brevitas`) and CPU (`ort_cpu`,
+`openvino`) backends plus FP32 / TF32 / FP16 / BF16 / INT8 variants.
 Intel Neural Compressor was evaluated (Wave 3) and removed — see the audit
 doc below for the incompatibility matrix. Full scope + architecture + commands in
 [`docs/architecture.md`](docs/architecture.md). Latest audit:
 [`docs/improvements/2026-04-18-trt-modelopt-audit.md`](docs/improvements/2026-04-18-trt-modelopt-audit.md).
-Latest plan: [`docs/plans/2026-04-18-wave3-ort-inc.md`](docs/plans/2026-04-18-wave3-ort-inc.md).
+Latest plan: [`docs/plans/2026-04-21-wave6-cpu-inference.md`](docs/plans/2026-04-21-wave6-cpu-inference.md).
 
 ## Critical conventions (load-bearing — violating these causes regressions)
 
@@ -31,6 +32,11 @@ Latest plan: [`docs/plans/2026-04-18-wave3-ort-inc.md`](docs/plans/2026-04-18-wa
   record in `Result.notes` with `meets_constraints=False`; `make all` must finish.
 - **TRT runner uses `torch.cuda`, not `pycuda`.** Shared torch CUDA context is
   mandatory; `pycuda.autoinit` caused illegal-memory-access on Windows.
+- **`scripts/run_cpu.py` must not import `tensorrt` at module load.** CPU-only
+  environments (CI, macOS, TRT-less Windows) rely on this to keep
+  `pytest tests/` green. openvino / onnxruntime.quantization imports live
+  inside dispatcher branches, and TRT-free helpers live in
+  `scripts/_weights_io.py`. Guarded by `test_run_cpu_imports_without_tensorrt`.
 
 See `docs/architecture.md` for extension hooks, QDQ→TRT compat checklist,
 and Windows-specific gotchas.
