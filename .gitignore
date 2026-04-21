@@ -220,3 +220,9 @@ runs/
 
 # Training artifacts (spec 2026-04-20 §3)
 trained_weights/
+
+# Wave 6 CPU inference artifacts (derivable — IR and ONNX caches)
+results_cpu/_ov_ir/
+results_cpu/_onnx/
+results_cpu_qr/_ov_ir/
+results_cpu_qr/_onnx/

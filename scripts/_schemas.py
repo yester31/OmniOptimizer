@@ -13,11 +13,12 @@ class ModelSpec(BaseModel):
 
 
 class RuntimeSpec(BaseModel):
-    engine: Literal["pytorch", "onnxruntime", "tensorrt"]
+    engine: Literal["pytorch", "onnxruntime", "tensorrt", "openvino"]
     mode: Optional[str] = None
     execution_provider: Optional[str] = None
     version: Optional[str] = None
-    dtype: Literal["fp32", "fp16", "int8"]
+    # Wave 6 adds "bf16" for ORT CPU EP on SPR+ (AMX) / Tiger Lake+ (AVX-512 BF16).
+    dtype: Literal["fp32", "fp16", "bf16", "int8"]
     sparsity: Optional[str] = None
 
 
@@ -28,7 +29,10 @@ class TechniqueSpec(BaseModel):
     # v1.1+ plans to add "modelopt" (nvidia-modelopt: torch-level quantization
     # + QDQ-ONNX export) and possibly "ort_quant" for ONNX Runtime's quantizer.
     source: Literal[
-        "trt_builtin", "modelopt", "ort_quant", "brevitas"
+        "trt_builtin", "modelopt", "ort_quant", "brevitas",
+        # Wave 6: CPU backends. ort_cpu uses onnxruntime CPUExecutionProvider;
+        # openvino uses Intel OpenVINO runtime directly (NNCF PTQ for INT8).
+        "ort_cpu", "openvino",
     ] = "trt_builtin"
     calibrator: Optional[str] = None
     calibration_samples: Optional[int] = None
@@ -75,6 +79,14 @@ class HardwareSpec(BaseModel):
     cuda: Optional[str] = None
     driver: Optional[str] = None
     requires_compute_capability_min: Optional[float] = None
+    # Wave 6: CPU recipes populate these; GPU recipes leave None. Used by
+    # env_lock.py for reproducibility and by recommend.py to distinguish
+    # results from different CPU tiers (e.g., Xeon 8480+ vs i9-13900K).
+    cpu_model: Optional[str] = None
+    cpu_cores_physical: Optional[int] = None
+    cpu_flags: Optional[list[str]] = None
+    numa_node: Optional[int] = None
+    governor: Optional[str] = None
 
 
 class MeasurementSpec(BaseModel):
@@ -86,6 +98,11 @@ class MeasurementSpec(BaseModel):
     input_size: int = 640
     gpu_clock_lock: bool = True
     seed: int = 42
+    # Wave 6: explicit CPU thread count. None → auto-detect physical cores.
+    # Zero forbidden because ORT treats 0 as "all logical cores including
+    # hyperthreads," which typically regresses perf vs physical-core pinning.
+    # See docs/plans/2026-04-21-wave6-cpu-inference.md Task 6 Step 3.
+    thread_count: Optional[int] = Field(default=None, gt=0)
 
 
 class ConstraintSpec(BaseModel):
@@ -143,6 +160,12 @@ class EnvInfo(BaseModel):
     torch: Optional[str] = None
     onnxruntime: Optional[str] = None
     ultralytics: Optional[str] = None
+    # Wave 6: CPU run captures these; GPU runs leave None. Historical GPU
+    # result JSONs stay valid (all-None defaults).
+    cpu_model: Optional[str] = None
+    cpu_cores_physical: Optional[int] = None
+    cpu_flags: Optional[list[str]] = None
+    openvino: Optional[str] = None
 
 
 class Result(BaseModel):

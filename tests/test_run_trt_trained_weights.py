@@ -28,8 +28,10 @@ def test_resolve_weights_no_training_returns_original():
 
 
 def test_resolve_weights_missing_trained_raises(tmp_path, monkeypatch):
-    from scripts import run_trt
-    monkeypatch.setattr(run_trt, "ROOT", tmp_path)
+    # _resolve_weights lives in scripts._weights_io (Wave 6 refactor).
+    # run_trt.py re-imports it, so patches must target the source module.
+    from scripts import _weights_io, run_trt
+    monkeypatch.setattr(_weights_io, "ROOT", tmp_path)
     recipe = _make_recipe(training=TrainingSpec(
         base_checkpoint="best_qr.pt", epochs=5, modifier="prune_24",
     ))
@@ -38,8 +40,8 @@ def test_resolve_weights_missing_trained_raises(tmp_path, monkeypatch):
 
 
 def test_resolve_weights_prune_24_returns_trained_path(tmp_path, monkeypatch):
-    from scripts import run_trt
-    monkeypatch.setattr(run_trt, "ROOT", tmp_path)
+    from scripts import _weights_io, run_trt
+    monkeypatch.setattr(_weights_io, "ROOT", tmp_path)
     tw = tmp_path / "trained_weights"
     tw.mkdir()
     trained = tw / "test_recipe.pt"
@@ -59,8 +61,8 @@ def test_resolve_weights_modelopt_returns_yolo_like(tmp_path, monkeypatch):
     modelopt_torch_opt = pytest.importorskip("modelopt.torch.opt")
     modelopt_torch_quantization = pytest.importorskip("modelopt.torch.quantization")
 
-    from scripts import run_trt
-    monkeypatch.setattr(run_trt, "ROOT", tmp_path)
+    from scripts import _weights_io, run_trt
+    monkeypatch.setattr(_weights_io, "ROOT", tmp_path)
     tw = tmp_path / "trained_weights"
     tw.mkdir()
     trained = tw / "test_recipe.pt"
@@ -87,6 +89,8 @@ def test_resolve_weights_modelopt_returns_yolo_like(tmp_path, monkeypatch):
     def fake_yolo(path):
         return _FakeYolo(path)
 
-    monkeypatch.setattr(run_trt, "_load_yolo_for_restore", fake_yolo)
+    # Patch the source module's _load_yolo_for_restore so the inner call site
+    # picks up the fake. Patching run_trt's re-export wouldn't reach it.
+    monkeypatch.setattr(_weights_io, "_load_yolo_for_restore", fake_yolo)
     out = run_trt._resolve_weights(recipe)
     assert hasattr(out, "model")  # YOLO-like
