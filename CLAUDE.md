@@ -19,11 +19,17 @@ doc below for the incompatibility matrix. Full scope + architecture + commands i
 Wave 6 CPU inference shipped 2026-04-21 — see
 [`docs/plans/2026-04-21-wave6-cpu-inference.md`](docs/plans/2026-04-21-wave6-cpu-inference.md)
 and `report_cpu_qr.md` at repo root for the 6-recipe ranking.
-Wave 7 ARCHIVED 2026-04-21 after Task 0 spike blocked both axes (PT2E
-torch.export vs ultralytics Detect head + XNNPACK EP missing from
-onnxruntime-gpu wheel). See `docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md`.
-Next plan: [`docs/plans/2026-04-21-wave8-ncnn.md`](docs/plans/2026-04-21-wave8-ncnn.md)
-(ncnn 모바일/엣지 편입, #50–#51 — YOLO 생태계 표준 모바일 런타임).
+Waves 7 and 8 both ARCHIVED 2026-04-21 after Task 0 spikes hit the
+same class of blocker: YOLO26n's end-to-end NMS pipeline (ReduceMax /
+TopK / GatherElements / anchors attribute mutation) rejected by
+external converters (torch.export, pnnx) and wheels (XNNPACK missing
+in onnxruntime-gpu). See
+[`docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md`](docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md)
+and
+[`docs/improvements/2026-04-21-wave8-r1-spike-results.md`](docs/improvements/2026-04-21-wave8-r1-spike-results.md).
+Next candidates (ordered by friction): Wave 9 DirectML EP (ORT-native,
+bypasses converter issues) / Wave 8 rescope with `end2end=False` export
+/ Wave 6 close-out.
 
 ## Critical conventions (load-bearing — violating these causes regressions)
 

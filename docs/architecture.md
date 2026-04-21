@@ -220,9 +220,11 @@ Implementation plan: ``docs/superpowers/plans/2026-04-20-qr-training-pipeline.md
 | Wave 4 | Brevitas eager PTQ | #20-#21 | active (#22 parked: no entropy observer) |
 | Wave 5 | Training pipeline (QAT/sparsity) | #07, #11, #17 | active (2026-04-20) |
 | Wave 6 | CPU inference (ORT CPU + OpenVINO) | #30-#35 | active (2026-04-21) |
-| Wave 7 | PyTorch PT2E + ORT XNNPACK EP | — | **ARCHIVED** (2026-04-21, Task 0 spike BLOCKED both axes — see `docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md`) |
-| Wave 8 | ncnn 모바일/엣지 편입 | #50-#51 | **planned** (2026-04-21, see `docs/plans/2026-04-21-wave8-ncnn.md`) |
-| Wave 9 | DirectML EP (Windows edge) | #60-#62 (잠정) | roadmap — NPU/Arc/Ryzen AI 단일 API |
+| Wave 7 | PyTorch PT2E + ORT XNNPACK EP | — | **ARCHIVED** (2026-04-21, Task 0 spike blocked both axes) |
+| Wave 8 | ncnn 모바일/엣지 편입 | — | **ARCHIVED** (2026-04-21, pnnx drops YOLO26n ReduceMax/TopK/GatherElements) |
+| Wave 9 | DirectML EP (Windows edge) | #60-#62 (잠정) | roadmap — ORT-native, 외부 변환기 회피 (Wave 7/8 교훈) |
+
+**Wave 3/7/8 패턴**: YOLO26n의 end-to-end NMS 파이프라인은 외부 변환기 (INC SmoothQuant, torch.export, pnnx)에서 반복 실패. ORT/OpenVINO 네이티브 경로는 문제 없음. 다음 wave 설계는 이 회피가 기본 원칙.
 
 **제외된 후보** (2026-04-21 검토): MNN(ncnn과 중복, 영어 문서 얇음), ExecutorTorch(2026 현재 alpha — Wave 10+ 재평가).
 
