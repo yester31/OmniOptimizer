@@ -1,7 +1,9 @@
 PYTHON ?= python
 RECIPES_DIR := recipes
 RESULTS_DIR := results
+RESULTS_CPU_DIR := results_cpu
 REPORT := report.md
+REPORT_CPU := report_cpu.md
 
 .PHONY: all clean env report \
         recipe-00 recipe-00-tf32 \
@@ -9,6 +11,8 @@ REPORT := report.md
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
         recipe-13 recipe-14 recipe-15 recipe-16 recipe-17 \
         recipe-20 recipe-21 recipe-22 \
+        recipe-30 recipe-31 recipe-32 recipe-33 recipe-34 recipe-35 \
+        cpu-all cpu-report cpu-qr \
         diagnose-recipe-%
 
 # Re-run a single recipe:  make recipe-11
@@ -98,9 +102,46 @@ recipe-22:
 # Parked recipes keep their JSON on disk for history but are dropped from the
 # ranking. #7/#11 need sparsity-aware training.
 PARKED := brevitas_int8_entropy
+# CPU parked list: openvino_int8_qat is a reserved #36 slot (training
+# pipeline for OV not in Wave 6 scope). Present for forward compatibility.
+PARKED_CPU := openvino_int8_qat
 
 report:
 	$(PYTHON) scripts/recommend.py --results-dir $(RESULTS_DIR) --out $(REPORT) --exclude "$(PARKED)"
+
+# -----------------------------------------------------------------------------
+# Wave 6 CPU recipes (#30-#35) — separate target so GPU measurement runs
+# aren't polluted by CPU load on laptops where both share the host.
+# -----------------------------------------------------------------------------
+
+recipe-30:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/30_ort_cpu_fp32.yaml --out $(RESULTS_CPU_DIR)/30_ort_cpu_fp32.json
+
+recipe-31:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/31_ort_cpu_bf16.yaml --out $(RESULTS_CPU_DIR)/31_ort_cpu_bf16.json
+
+recipe-32:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/32_ort_cpu_int8_dynamic.yaml --out $(RESULTS_CPU_DIR)/32_ort_cpu_int8_dynamic.json
+
+recipe-33:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/33_ort_cpu_int8_static.yaml --out $(RESULTS_CPU_DIR)/33_ort_cpu_int8_static.json
+
+recipe-34:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/34_openvino_fp32.yaml --out $(RESULTS_CPU_DIR)/34_openvino_fp32.json
+
+recipe-35:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/35_openvino_int8_nncf.yaml --out $(RESULTS_CPU_DIR)/35_openvino_int8_nncf.json
+
+# Full CPU bank + report. Does NOT include `recipe-31` automatically if
+# the host lacks BF16 ISA (the recipe self-skips with a notes entry).
+cpu-all: recipe-30 recipe-31 recipe-32 recipe-33 recipe-34 recipe-35 cpu-report
+
+cpu-report:
+	$(PYTHON) scripts/recommend.py --results-dir $(RESULTS_CPU_DIR) --out $(REPORT_CPU) --exclude "$(PARKED_CPU)"
+
+# CPU bank against the QR-fine-tuned checkpoint (mirrors GPU QR batch flow).
+cpu-qr:
+	bash scripts/run_cpu_batch.sh
 
 # Accuracy / NaN / precision diagnostics via polygraphy.
 # Usage:  make diagnose-recipe-06   (runs both --validate and --debug-precision)
