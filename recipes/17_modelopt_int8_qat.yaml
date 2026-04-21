@@ -1,4 +1,4 @@
-name: trt_int8_sparsity
+name: modelopt_int8_qat
 model:
   family: yolo26
   variant: n
@@ -8,30 +8,28 @@ runtime:
   engine: tensorrt
   version: null
   dtype: int8
-  sparsity: "2:4"             # HW-accelerated on Ampere+
 technique:
-  name: int8_ptq_sparsity
-  calibrator: entropy
-  calibration_samples: 512
-  calibration_dataset: coco_val2017
-  calibration_seed: 42
+  name: int8_qat
+  source: modelopt
+  calibrator: null
+  calibration_samples: null
+  calibration_dataset: null
   training:
     base_checkpoint: best_qr.pt
-    epochs: 60
+    epochs: 30
     batch: 8
     workers: 4
     imgsz: 640
-    lr0: 0.001
+    lr0: 0.0001
     optimizer: AdamW
     seed: 42
     data_yaml: qr_barcode.yaml
-    modifier: prune_24
-    prune_amount: 0.5
+    modifier: modelopt_qat
+    quant_config: int8_default
 hardware:
   gpu: null
   cuda: null
   driver: null
-  requires_compute_capability_min: 8.0    # Ampere+
 measurement:
   dataset: coco_val2017
   num_images: 500

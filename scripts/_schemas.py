@@ -28,7 +28,7 @@ class TechniqueSpec(BaseModel):
     # v1.1+ plans to add "modelopt" (nvidia-modelopt: torch-level quantization
     # + QDQ-ONNX export) and possibly "ort_quant" for ONNX Runtime's quantizer.
     source: Literal[
-        "trt_builtin", "modelopt", "ort_quant"
+        "trt_builtin", "modelopt", "ort_quant", "brevitas"
     ] = "trt_builtin"
     calibrator: Optional[str] = None
     calibration_samples: Optional[int] = None
@@ -42,6 +42,32 @@ class TechniqueSpec(BaseModel):
     # v1.2: ONNX node names to leave at FP16 during modelopt.onnx quantize.
     # Protects sensitivity-critical layers (stem Conv, detect head branches).
     nodes_to_exclude: Optional[list[str]] = None
+    # v1.3: fine-tune before quantize (QAT / sparsity recovery). None for
+    # PTQ-only recipes. Drives scripts/train.py; see TrainingSpec.
+    training: Optional["TrainingSpec"] = None
+
+
+class TrainingSpec(BaseModel):
+    """Fine-tuning recipe for QAT / sparsity modifiers.
+
+    Appears under ``TechniqueSpec.training`` and activates the
+    ``scripts/train.py`` entry point. Absent for non-training recipes.
+    """
+    base_checkpoint: str
+    epochs: int
+    batch: int = 8
+    workers: int = 4
+    imgsz: int = 640
+    lr0: float = 0.001
+    optimizer: str = "AdamW"
+    seed: int = 42
+    data_yaml: Optional[str] = None
+    modifier: Literal["prune_24", "modelopt_sparsify", "modelopt_qat"]
+    prune_amount: Optional[float] = None
+    quant_config: Optional[str] = "int8_default"
+
+
+TechniqueSpec.model_rebuild()
 
 
 class HardwareSpec(BaseModel):
@@ -140,8 +166,16 @@ class Result(BaseModel):
 
 
 def load_recipe(path: str) -> Recipe:
+    import os
     import yaml
 
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
+    # Env override so one recipe bank can evaluate multiple checkpoints
+    # (e.g., generic yolo26n.pt vs a fine-tuned best.pt). Keeps recipe files
+    # as the canonical default while letting batch runs swap weights without
+    # editing 21 YAMLs.
+    weights_override = os.environ.get("OMNI_WEIGHTS_OVERRIDE")
+    if weights_override:
+        data.setdefault("model", {})["weights"] = weights_override
     return Recipe.model_validate(data)

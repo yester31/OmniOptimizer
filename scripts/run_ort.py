@@ -35,6 +35,7 @@ from scripts.measure import (  # noqa: E402
     measure_latency,
     throughput_from_latency,
 )
+from scripts import _split  # noqa: E402
 
 
 def _seed_all(seed: int) -> None:
@@ -175,7 +176,12 @@ def run(recipe_path: str, out_path: str) -> int:
             from ultralytics import YOLO
 
             m = YOLO(str(onnx_path_default))
-            data_yaml = os.environ.get("OMNI_COCO_YAML", "coco.yaml")
+            data_yaml = _split.eval_yaml(
+                os.environ.get("OMNI_COCO_YAML", "coco.yaml"),
+                calib_yaml_path=_split.calib_yaml(),
+                calib_seed=recipe.technique.calibration_seed or 42,
+                calib_n=recipe.technique.calibration_samples or 512,
+            )
             metrics = m.val(data=data_yaml, imgsz=imgsz, batch=1, half=half,
                             device=0, plots=False, verbose=False)
             acc = AccuracyStats(

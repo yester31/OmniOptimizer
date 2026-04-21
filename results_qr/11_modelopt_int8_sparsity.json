@@ -1,7 +1,7 @@
 {
-  "recipe": "modelopt_int8_ptq",
-  "started_at": "2026-04-18T12:11:24.917794+00:00",
-  "finished_at": "2026-04-18T12:14:18.896032+00:00",
+  "recipe": "modelopt_int8_sparsity",
+  "started_at": "2026-04-21T00:56:40.831952+00:00",
+  "finished_at": "2026-04-21T00:58:05.621065+00:00",
   "env": {
     "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
     "gpu_compute_capability": "8.6",
@@ -17,23 +17,23 @@
   },
   "model_size_mb": null,
   "latency_ms": {
-    "p50": 2.620049999677576,
-    "p95": 2.782214993203524,
-    "p99": 3.2083679854986333,
+    "p50": 2.276000042911619,
+    "p95": 2.4094800028251484,
+    "p99": 2.463528956868686,
     "p50_gpu": null,
     "p95_gpu": null,
     "p99_gpu": null
   },
   "throughput_fps": {
-    "bs1": 381.6721055411386,
-    "bs8": 756.4296520006615
+    "bs1": 439.36730278824155,
+    "bs8": 832.9038648481986
   },
   "peak_gpu_mem_mb": 38.05615234375,
   "peak_gpu_mem_mb_nvml_delta": null,
-  "cold_start_ms": 452.8688999998849,
+  "cold_start_ms": 409.5236999564804,
   "accuracy": {
-    "map_50": 0.5210864423225651,
-    "map_50_95": 0.3650897775574839
+    "map_50": 0.9868882125060877,
+    "map_50_95": 0.915239492924797
   },
   "meets_constraints": true,
   "notes": null

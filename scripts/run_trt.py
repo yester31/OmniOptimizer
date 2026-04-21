@@ -41,6 +41,59 @@ from scripts.measure import (  # noqa: E402
     measure_latency,
     throughput_from_latency,
 )
+from scripts import _split  # noqa: E402
+
+# Module-level override set by run() when _resolve_weights returns a YOLO
+# instance (modelopt_sparsify / modelopt_qat). Reset to None after run()
+# completes to prevent state leaking between unit-test invocations.
+_MAIN_TRAINED_YOLO = None  # type: ignore[var-annotated]
+
+
+def _load_yolo_for_restore(base_path: str):
+    """Load a plain YOLO instance to serve as the architecture skeleton
+    for mto.restore()."""
+    from ultralytics import YOLO
+    return YOLO(base_path)
+
+
+def _resolve_weights(recipe: Recipe):
+    """Return runner input: either a path string, or a YOLO-like object
+    whose ``.model`` has modelopt modules restored.
+
+    - No training: str path (recipe.model.weights).
+    - prune_24 trained: str path to trained_weights/{name}.pt (plain
+      ultralytics checkpoint after prune.remove()).
+    - modelopt_sparsify / modelopt_qat: YOLO instance with mto.restore()
+      applied; downstream _export_onnx accepts YOLO objects directly
+      (see the ``is_path`` branch near line 70).
+    """
+    if recipe.technique.training is None:
+        return recipe.model.weights
+    trained = ROOT / "trained_weights" / f"{recipe.name}.pt"
+    if not trained.exists():
+        raise RuntimeError(
+            f"Recipe {recipe.name!r} requires training but {trained} is "
+            f"missing. Run: python scripts/train.py --recipe "
+            f"recipes/{recipe.name}.yaml"
+        )
+    modifier = recipe.technique.training.modifier
+    if modifier == "prune_24":
+        return str(trained)
+    if modifier in ("modelopt_sparsify", "modelopt_qat"):
+        import modelopt.torch.opt as mto
+        yolo = _load_yolo_for_restore(recipe.model.weights)
+        mto.restore(yolo.model, str(trained))
+        return yolo
+    raise RuntimeError(f"unexpected modifier: {modifier!r}")
+
+
+def _get_weights_or_yolo(recipe: Recipe):
+    """Return _MAIN_TRAINED_YOLO if set (modelopt trained), else recipe.model.weights.
+
+    Call sites that accept both str paths and YOLO instances (e.g. _export_onnx)
+    should use this helper to transparently pick up a restored modelopt model.
+    """
+    return _MAIN_TRAINED_YOLO if _MAIN_TRAINED_YOLO is not None else recipe.model.weights
 
 
 def _seed_all(seed: int) -> None:
@@ -169,17 +222,23 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         return cached
 
     if recipe.technique.sparsity_preprocess == "2:4":
-        yolo = _apply_modelopt_sparsify(recipe.model.weights, imgsz)
+        # For modelopt trained recipes, _get_weights_or_yolo() returns the
+        # already-restored YOLO; _apply_modelopt_sparsify expects a str path,
+        # so fall through to the plain weights when a trained YOLO is present.
+        if _MAIN_TRAINED_YOLO is not None:
+            yolo = _MAIN_TRAINED_YOLO
+        else:
+            yolo = _apply_modelopt_sparsify(recipe.model.weights, imgsz)
         clean_onnx = _export_onnx(yolo, imgsz, half=False,
                                   cache_dir=cache_dir, dynamic=dynamic,
                                   tag_suffix="_sparse24")
     else:
-        clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
+        clean_onnx = _export_onnx(_get_weights_or_yolo(recipe), imgsz, half=False,
                                   cache_dir=cache_dir, dynamic=dynamic)
 
     samples = recipe.technique.calibration_samples or 512
     seed = recipe.technique.calibration_seed or 42
-    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    val_yaml = _split.calib_yaml()
     calib_data = _build_calib_numpy(val_yaml, samples, imgsz, seed)
 
     quant_kwargs = dict(
@@ -280,7 +339,7 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         print(f"[info] ort_quant cache hit: {cached.name}", file=sys.stderr)
         return cached
 
-    clean_onnx = _export_onnx(recipe.model.weights, imgsz, half=False,
+    clean_onnx = _export_onnx(_get_weights_or_yolo(recipe), imgsz, half=False,
                               cache_dir=cache_dir, dynamic=dynamic)
 
     # ORT's quantize_static recommends running shape inference + model
@@ -309,7 +368,7 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
             preproc_path = clean_onnx
     source_onnx = preproc_path
 
-    val_yaml = os.environ.get("OMNI_COCO_YAML")
+    val_yaml = _split.calib_yaml()
     calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
 
     import onnx
@@ -376,6 +435,245 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     return cached
 
 
+def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
+                           dynamic: bool = True) -> Path:
+    """Quantize via Brevitas (PyTorch-native, eager-mode) and export QDQ ONNX
+    that TensorRT's explicit-quantization path consumes identically to
+    modelopt/ort_quant output.
+
+    Eager-mode layer replacement (Conv2d → QuantConv2d, Linear → QuantLinear)
+    is used in place of Brevitas's graph-mode ``quantize`` because ultralytics'
+    ``YOLO.forward`` uses Python-level list iteration that ``torch.fx`` cannot
+    trace. Eager-mode keeps the original ultralytics module tree intact, so
+    ``yolo.export(format='onnx')`` still reaches its deploy-path wrapper and
+    emits the NMS-ready output layout the evaluation code expects.
+
+    Supported ``technique.calibrator`` values:
+      - ``percentile`` — activation scale from p99.99 of observed values
+      - ``mse``        — Brevitas MSE-minimizing act + weight quantizers
+      - ``entropy``    — NOT SUPPORTED; Brevitas 0.10.x has no entropy/KL
+        observer. Raises NotImplementedError. Recipe #22 is parked.
+
+    Quantizer config enforces the TRT compat checklist:
+      - per-channel symmetric INT8 weights on Conv axis=0
+      - per-tensor symmetric INT8 activations (zero_point=0)
+      - no bias quantization (TRT computes INT32 bias from act*weight scales)
+    """
+    _BREVITAS_ALGOS = ("percentile", "mse")
+    algo = (recipe.technique.calibrator or "percentile").lower()
+    if algo == "entropy":
+        raise NotImplementedError(
+            "brevitas backend: 'entropy' calibrator is not supported — Brevitas "
+            "has no entropy/KL activation observer in 0.10.x. Use 'percentile' "
+            "or 'mse'. Recipe #22 is parked for this reason."
+        )
+    if algo not in _BREVITAS_ALGOS:
+        raise ValueError(
+            f"brevitas backend supports calibrator in {list(_BREVITAS_ALGOS)}, "
+            f"got {algo!r}"
+        )
+
+    # Brevitas 0.10-0.12 pin `dependencies==2.0.1`, whose _check_dunder_name
+    # rejects Brevitas's own internal injector classes. Neutralize it before
+    # any brevitas import. Harmless no-op if the upstream pin is ever relaxed.
+    try:
+        import _dependencies.checks.injector as _dep_inj
+        _dep_inj._check_dunder_name = lambda name: None
+    except ImportError:
+        pass
+
+    try:
+        import torch
+        from torch import nn
+        from brevitas import nn as qnn
+        from brevitas.graph.calibrate import calibration_mode
+        from brevitas.export import export_onnx_qcdq
+        from brevitas.quant.scaled_int import (
+            Int8ActPerTensorFloat,
+            Int8ActPerTensorFloatMSE,
+            Int8WeightPerChannelFloat,
+            Int8WeightPerChannelFloatMSE,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"brevitas not available ({type(e).__name__}: {e}). "
+            "Install with `pip install brevitas>=0.10`."
+        ) from e
+
+    n_samples = int(recipe.technique.calibration_samples or 512)
+    seed = int(recipe.technique.calibration_seed or 42)
+    bs_tag = "dyn" if dynamic else "bs1"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = cache_dir / (
+        f"{Path(recipe.model.weights).stem}_{imgsz}_brev_{algo}_"
+        f"{n_samples}_s{seed}_{bs_tag}.qdq.onnx"
+    )
+    if cached.exists():
+        print(f"[info] brevitas cache hit: {cached.name}", file=sys.stderr)
+        return cached
+
+    from ultralytics import YOLO
+
+    yolo = _MAIN_TRAINED_YOLO if _MAIN_TRAINED_YOLO is not None else YOLO(recipe.model.weights)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    yolo.model = yolo.model.to(device).eval()
+
+    # Distinct quantizer classes per algorithm so that calibration actually
+    # produces different activation/weight scales. The previous implementation
+    # passed all knobs through kwargs and left mse/entropy at defaults — which
+    # silently produced byte-identical ONNX across all three variants.
+    if algo == "percentile":
+        class _PercentileAct(Int8ActPerTensorFloat):
+            high_percentile_q = 99.99
+            low_percentile_q = 0.01
+        act_quant_cls = _PercentileAct
+        weight_quant_cls = Int8WeightPerChannelFloat
+    elif algo == "mse":
+        act_quant_cls = Int8ActPerTensorFloatMSE
+        weight_quant_cls = Int8WeightPerChannelFloatMSE
+    else:
+        raise AssertionError(f"unreachable algo={algo!r}")
+
+    def _swap_layer(parent: nn.Module, name: str, child: nn.Module):
+        if isinstance(child, nn.Conv2d):
+            new = qnn.QuantConv2d(
+                in_channels=child.in_channels,
+                out_channels=child.out_channels,
+                kernel_size=child.kernel_size,
+                stride=child.stride,
+                padding=child.padding,
+                dilation=child.dilation,
+                groups=child.groups,
+                bias=(child.bias is not None),
+                weight_quant=weight_quant_cls,
+                input_quant=act_quant_cls,
+                bias_quant=None,
+                return_quant_tensor=False,
+            )
+            new.weight.data = child.weight.data.clone()
+            if child.bias is not None:
+                new.bias.data = child.bias.data.clone()
+            new = new.to(device)
+            setattr(parent, name, new)
+            return True
+        if isinstance(child, nn.Linear):
+            new = qnn.QuantLinear(
+                in_features=child.in_features,
+                out_features=child.out_features,
+                bias=(child.bias is not None),
+                weight_quant=weight_quant_cls,
+                input_quant=act_quant_cls,
+                bias_quant=None,
+                return_quant_tensor=False,
+            )
+            new.weight.data = child.weight.data.clone()
+            if child.bias is not None:
+                new.bias.data = child.bias.data.clone()
+            new = new.to(device)
+            setattr(parent, name, new)
+            return True
+        return False
+
+    def _walk(module: nn.Module):
+        replaced = 0
+        for name, child in list(module.named_children()):
+            if _swap_layer(module, name, child):
+                replaced += 1
+            else:
+                replaced += _walk(child)
+        return replaced
+
+    n_swapped = _walk(yolo.model)
+    print(
+        f"[info] brevitas swapped {n_swapped} Conv2d/Linear layers "
+        f"(algo={algo})",
+        file=sys.stderr,
+    )
+
+    val_yaml = _split.calib_yaml()
+    calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
+
+    import numpy as np
+
+    def _batch_iter(arr, bs: int = 8):
+        for i in range(0, len(arr), bs):
+            chunk = arr[i:i + bs]
+            if chunk.ndim == 3:
+                chunk = chunk[None, ...]
+            yield torch.from_numpy(np.ascontiguousarray(chunk)).to(device)
+
+    print(
+        f"[info] brevitas calibrate: algo={algo}, samples={n_samples}, "
+        f"weights={Path(recipe.model.weights).name}",
+        file=sys.stderr,
+    )
+    yolo.model.eval()
+    with torch.no_grad():
+        with calibration_mode(yolo.model):
+            for x in _batch_iter(calib_arr):
+                yolo.model(x)
+
+    # Export via ultralytics' exporter so the inference head wrapper (NMS-ready
+    # output layout) is preserved — raw torch.onnx.export on yolo.model would
+    # emit feature-map outputs that the validator can't consume.
+    # StdQCDQONNXManager globally registers QDQ symbolic functions for
+    # QuantConv2d/QuantLinear; once set_export_mode is on, torch.onnx.export
+    # (called from inside ultralytics.Exporter) emits Q/DQ nodes around the
+    # quantized layers.
+    # Put ultralytics Detect head(s) in export mode so forward() emits the
+    # NMS-ready concatenated tensor instead of a tuple of feature maps.
+    # ultralytics.Exporter would normally do this, but it also deepcopies the
+    # model, which fails on Brevitas quant layers (non-leaf cached tensors).
+    # Bypass Exporter and drive Brevitas's own export_onnx_qcdq directly.
+    try:
+        from ultralytics.nn.modules import Detect
+        detect_heads = [m for m in yolo.model.modules() if isinstance(m, Detect)]
+    except ImportError:
+        detect_heads = []
+    for head in detect_heads:
+        head.export = True
+        head.format = "onnx"
+
+    dummy = torch.zeros((1, 3, imgsz, imgsz), device=device)
+    raw_out = cache_dir / (cached.stem + ".raw.onnx")
+    try:
+        export_onnx_qcdq(
+            yolo.model,
+            args=dummy,
+            export_path=str(raw_out),
+            opset_version=17,
+            dynamic_axes={"images": {0: "batch"}} if dynamic else None,
+            input_names=["images"],
+        )
+    finally:
+        for head in detect_heads:
+            head.export = False
+
+    print(f"[info] brevitas exported raw QDQ onnx: {raw_out.name}", file=sys.stderr)
+
+    try:
+        from onnxruntime.quantization.shape_inference import quant_pre_process
+
+        quant_pre_process(
+            input_model_path=str(raw_out),
+            output_model_path=str(cached),
+            skip_optimization=False,
+            skip_onnx_shape=False,
+            skip_symbolic_shape=False,
+            auto_merge=True,
+            verbose=0,
+        )
+        print(f"[info] brevitas wrote QDQ onnx: {cached}", file=sys.stderr)
+    except Exception as e:
+        print(
+            f"[warn] brevitas preprocess failed ({e}); using raw export",
+            file=sys.stderr,
+        )
+        raw_out.replace(cached)
+
+    return cached
+
+
 # Short tags appear in engine cache filenames. Long ``technique.source`` names
 # push paths past Windows' 260-char MAX_PATH when combined with the
 # imgsz/calibrator/bs/version suffixes already in the tag.
@@ -383,6 +681,7 @@ _SOURCE_TAG = {
     "trt_builtin": "",
     "modelopt": "_modelopt",
     "ort_quant": "_ort",
+    "brevitas": "_brev",
 }
 
 
@@ -416,12 +715,13 @@ def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed
 
     if os.environ.get("OMNI_ALLOW_RANDOM_CALIB") != "1":
         raise RuntimeError(
-            "Calibration data unavailable: OMNI_COCO_YAML is not set or the "
-            "referenced dataset produced no readable images. Random-normal "
-            "calibration silently drops INT8 mAP by double digits. Set "
-            "OMNI_COCO_YAML to a valid ultralytics dataset yaml (with a val "
-            "split pointing at real images), or pass OMNI_ALLOW_RANDOM_CALIB=1 "
-            "to explicitly opt in to the random-normal fallback."
+            "Calibration data unavailable: neither OMNI_CALIB_YAML nor "
+            "OMNI_COCO_YAML points at a dataset producing readable images. "
+            "Random-normal calibration silently drops INT8 mAP by double "
+            "digits. Set OMNI_CALIB_YAML (or OMNI_COCO_YAML) to a valid "
+            "ultralytics dataset yaml (with a val split pointing at real "
+            "images), or pass OMNI_ALLOW_RANDOM_CALIB=1 to explicitly opt in "
+            "to the random-normal fallback."
         )
     print("[warn] OMNI_ALLOW_RANDOM_CALIB=1: using random-normal calibration "
           "(INT8 mAP will be degraded)", file=sys.stderr)
@@ -443,13 +743,15 @@ def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     source = recipe.technique.source
     dynamic = bs > 1
     if source == "trt_builtin":
-        path = _export_onnx(recipe.model.weights, imgsz, half=False,
+        path = _export_onnx(_get_weights_or_yolo(recipe), imgsz, half=False,
                             cache_dir=cache_dir, dynamic=dynamic)
         return path, False
     if source == "modelopt":
         return _prepare_modelopt_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     if source == "ort_quant":
         return _prepare_ort_quant_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
+    if source == "brevitas":
+        return _prepare_brevitas_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     raise ValueError(f"unknown technique.source: {source!r}")
 
 
@@ -472,27 +774,9 @@ def _letterbox(img, imgsz: int):
 
 
 def _resolve_val_image_paths(yaml_path: str) -> list[str]:
-    """Parse a ultralytics-style dataset yaml and return absolute val image
-    paths. Keeps the resolution logic in one place so callers don't re-implement
-    the ``path`` + ``val`` relative-path dance."""
-    import yaml as yaml_mod
-
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        spec = yaml_mod.safe_load(f)
-    root = Path(spec["path"])
-    val_rel = spec["val"]
-    val_txt = (root / val_rel) if not Path(val_rel).is_absolute() else Path(val_rel)
-
-    with open(val_txt, "r", encoding="utf-8") as f:
-        lines = [ln.strip() for ln in f if ln.strip()]
-
-    paths: list[str] = []
-    for ln in lines:
-        p = Path(ln)
-        if not p.is_absolute():
-            p = (root / ln).resolve()
-        paths.append(str(p))
-    return paths
+    """Thin alias for :func:`scripts._split.resolve_val_image_paths`.
+    Kept for backwards compat with callers below; prefer the shared helper."""
+    return _split.resolve_val_image_paths(yaml_path)
 
 
 def _make_coco_calibrator(shape, n_samples: int, cache_path: Path, seed: int,
@@ -677,7 +961,7 @@ def _build_engine(
             print("[info] INT8+FP16: QDQ-preapplied ONNX (no calibrator)", file=sys.stderr)
         else:
             cache_file = engine_path.with_suffix(".calib")
-            val_yaml = os.environ.get("OMNI_COCO_YAML")
+            val_yaml = _split.calib_yaml()
             calibrator = None
             # Calibrator batch must match the optimization profile's batch,
             # otherwise TRT rejects the calibration shape on engine build
@@ -838,8 +1122,18 @@ def _make_trt_forward(engine_path: Path, batch_size: int, imgsz: int):  # pragma
 
 
 def run(recipe_path: str, out_path: str) -> int:
+    global _MAIN_TRAINED_YOLO
     recipe: Recipe = load_recipe(recipe_path)
     _seed_all(recipe.measurement.seed)
+
+    # spec §6 / Task 8: resolve weights. May return YOLO instance for
+    # modelopt trained recipes; downstream call sites use _get_weights_or_yolo().
+    _MAIN_TRAINED_YOLO = None
+    resolved = _resolve_weights(recipe)
+    if isinstance(resolved, (str, Path)):
+        recipe.model.weights = str(resolved)
+    else:
+        _MAIN_TRAINED_YOLO = resolved
 
     env = collect_env()
     clock_note = lock_gpu_clock(recipe.measurement.gpu_clock_lock)
@@ -971,7 +1265,12 @@ def run(recipe_path: str, out_path: str) -> int:
                     raise RuntimeError("no bs=1 engine available for mAP eval")
                 eng_for_val = matches[-1]
             m = YOLO(str(eng_for_val))
-            data_yaml = os.environ.get("OMNI_COCO_YAML", "coco.yaml")
+            data_yaml = _split.eval_yaml(
+                os.environ.get("OMNI_COCO_YAML", "coco.yaml"),
+                calib_yaml_path=_split.calib_yaml(),
+                calib_seed=recipe.technique.calibration_seed or 42,
+                calib_n=recipe.technique.calibration_samples or 512,
+            )
             metrics = m.val(data=data_yaml, imgsz=imgsz, batch=1, device=0,
                             plots=False, verbose=False)
             acc = AccuracyStats(
@@ -1007,6 +1306,7 @@ def run(recipe_path: str, out_path: str) -> int:
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(json.loads(result.model_dump_json()), f, indent=2)
     print(f"wrote {out_path}")
+    _MAIN_TRAINED_YOLO = None  # reset to prevent state leak between test runs
     return 0
 
 

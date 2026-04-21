@@ -34,8 +34,12 @@ trt = [
     "tensorrt>=10.0",
     "polygraphy>=0.49",
 ]
+brevitas = [
+    "brevitas>=0.11",
+]
+modelopt = ["nvidia-modelopt>=0.15"]
 all = [
-    "omnioptimizer[torch,onnx,trt]",
+    "omnioptimizer[torch,onnx,trt,brevitas,modelopt]",
 ]
 
 [project.scripts]
@@ -45,4 +49,7 @@ omni-run-trt = "scripts.run_trt:main"
 omni-recommend = "scripts.recommend:main"
 
 [tool.setuptools]
-packages = ["scripts"]
+packages = ["scripts", "scripts._modifiers"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

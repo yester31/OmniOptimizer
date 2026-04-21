@@ -1,0 +1,40 @@
+{
+  "recipe": "torchcompile_fp16",
+  "started_at": "2026-04-18T13:53:41.959719+00:00",
+  "finished_at": "2026-04-18T13:55:08.000996+00:00",
+  "env": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu_compute_capability": "8.6",
+    "cuda": "12.9",
+    "cudnn": "91002",
+    "driver": "576.80",
+    "tensorrt": "10.16.0.72",
+    "os": "Windows 11",
+    "python": "3.13.3",
+    "torch": "2.8.0+cu129",
+    "onnxruntime": "1.22.0",
+    "ultralytics": "8.4.27"
+  },
+  "model_size_mb": 5.147953987121582,
+  "latency_ms": {
+    "p50": 25.623149995226413,
+    "p95": 35.196089997771196,
+    "p99": 37.606868990405935,
+    "p50_gpu": null,
+    "p95_gpu": null,
+    "p99_gpu": null
+  },
+  "throughput_fps": {
+    "bs1": 39.02720782520103,
+    "bs8": 312.11168930540816
+  },
+  "peak_gpu_mem_mb": 160.1767578125,
+  "peak_gpu_mem_mb_nvml_delta": null,
+  "cold_start_ms": 3035.5818000098225,
+  "accuracy": {
+    "map_50": 0.9876171333699317,
+    "map_50_95": 0.9360135665011804
+  },
+  "meets_constraints": true,
+  "notes": "torch.compile unavailable, fell back to eager: TritonMissing: Cannot find a working triton installation. Either the package is not installed or it is too old. More information on installing Triton can be found at: https://github.com/triton-lang/triton\n\nSet TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS=\"+dynamo\"\n"
+}

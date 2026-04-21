@@ -182,6 +182,26 @@ constraints:
   branch (`/model.23/cv3.*/Conv`)는 softmax 덕에 INT8 오차에 robust하므로
   **일반적으로 exclude에 포함하지 않습니다** — 넣으면 fps만 깎임.
 
+## QR/Barcode fine-tuned checkpoint
+
+Recipes `#07`, `#11`, and `#17` fine-tune on a 2-class (barcode, qrcode) YOLO26n
+checkpoint. The file is gitignored; copy it locally before running training /
+QR-specific evaluation:
+
+    cp "C:/Users/yeste/OneDrive/Desktop/QR_Barcode/QR_Barcode_detection/yolo26n_qrcode_barcode_bg/weights/best.pt" ./best_qr.pt
+
+External users can substitute any 2-class (nc=2) ultralytics checkpoint.
+
+Training:
+
+    bash scripts/run_qr_train_batch.sh
+
+produces `trained_weights/{recipe}.pt` (~2 hours total on RTX 3060 Laptop).
+
+Smoke dry-run (1 epoch, 10% data, ~3 minutes):
+
+    OMNI_TRAIN_SMOKE=1 bash scripts/run_qr_train_batch.sh
+
 ## 설계 배경
 
 이 저장소의 구조·결정 사유는 `CLAUDE.md`와 (개인 머신의)

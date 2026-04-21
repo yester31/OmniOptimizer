@@ -215,4 +215,8 @@ results/_engines/
 results/_onnx/
 results/_trt_timing.cache
 results/_diag/
+results/_calib_eval_split/
 runs/
+
+# Training artifacts (spec 2026-04-20 §3)
+trained_weights/

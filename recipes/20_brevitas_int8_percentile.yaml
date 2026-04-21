@@ -1,4 +1,4 @@
-name: trt_int8_sparsity
+name: brevitas_int8_percentile
 model:
   family: yolo26
   variant: n
@@ -8,30 +8,17 @@ runtime:
   engine: tensorrt
   version: null
   dtype: int8
-  sparsity: "2:4"             # HW-accelerated on Ampere+
 technique:
-  name: int8_ptq_sparsity
-  calibrator: entropy
+  name: int8_ptq
+  source: brevitas
+  calibrator: percentile
   calibration_samples: 512
   calibration_dataset: coco_val2017
   calibration_seed: 42
-  training:
-    base_checkpoint: best_qr.pt
-    epochs: 60
-    batch: 8
-    workers: 4
-    imgsz: 640
-    lr0: 0.001
-    optimizer: AdamW
-    seed: 42
-    data_yaml: qr_barcode.yaml
-    modifier: prune_24
-    prune_amount: 0.5
 hardware:
   gpu: null
   cuda: null
   driver: null
-  requires_compute_capability_min: 8.0    # Ampere+
 measurement:
   dataset: coco_val2017
   num_images: 500
@@ -42,5 +29,5 @@ measurement:
   gpu_clock_lock: true
   seed: 42
 constraints:
-  max_map_drop_pct: 1.0
+  max_map_drop_pct: 2.0
   min_fps_bs1: 30

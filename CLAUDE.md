@@ -35,6 +35,14 @@ Latest plan: [`docs/plans/2026-04-18-wave3-ort-inc.md`](docs/plans/2026-04-18-wa
 See `docs/architecture.md` for extension hooks, QDQ→TRT compat checklist,
 and Windows-specific gotchas.
 
+## Health Stack
+
+- test: pytest tests/ -q
+- typecheck: mypy scripts --ignore-missing-imports --no-strict-optional
+- shell: (not installed — skellcheck 없음, 스킵)
+- lint: (ruff 미설정 — 스킵)
+- deadcode: (vulture 없음 — 스킵)
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the

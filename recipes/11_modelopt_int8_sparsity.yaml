@@ -22,6 +22,17 @@ technique:
   # for the SPARSE_WEIGHTS hint (harmless no-op on dense weights). Real 2:4
   # with sparsity-aware training is deferred to v1.3.
   # sparsity_preprocess: "2:4"
+  training:
+    base_checkpoint: best_qr.pt
+    epochs: 60
+    batch: 8
+    workers: 4
+    imgsz: 640
+    lr0: 0.001
+    optimizer: AdamW
+    seed: 42
+    data_yaml: qr_barcode.yaml
+    modifier: modelopt_sparsify
 hardware:
   gpu: null
   cuda: null

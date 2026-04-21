@@ -1,0 +1,40 @@
+{
+  "recipe": "ort_trt_fp16",
+  "started_at": "2026-04-18T13:57:41.955315+00:00",
+  "finished_at": "2026-04-18T14:04:00.523425+00:00",
+  "env": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu_compute_capability": "8.6",
+    "cuda": "12.9",
+    "cudnn": "91002",
+    "driver": "576.80",
+    "tensorrt": "10.16.0.72",
+    "os": "Windows 11",
+    "python": "3.13.3",
+    "torch": "2.8.0+cu129",
+    "onnxruntime": "1.22.0",
+    "ultralytics": "8.4.27"
+  },
+  "model_size_mb": 4.742040634155273,
+  "latency_ms": {
+    "p50": 4.740049989777617,
+    "p95": 5.831390002276748,
+    "p99": 7.450474007637242,
+    "p50_gpu": null,
+    "p95_gpu": null,
+    "p99_gpu": null
+  },
+  "throughput_fps": {
+    "bs1": 210.96823918663264,
+    "bs8": 399.3371002240795
+  },
+  "peak_gpu_mem_mb": null,
+  "peak_gpu_mem_mb_nvml_delta": null,
+  "cold_start_ms": 174909.9065999908,
+  "accuracy": {
+    "map_50": 0.9893191399844994,
+    "map_50_95": 0.9334225112132678
+  },
+  "meets_constraints": true,
+  "notes": "execution_provider=TensorrtExecutionProvider, onnx=best_qr_640_fp16_bs1.onnx"
+}

@@ -7,7 +7,8 @@ REPORT := report.md
         recipe-00 recipe-00-tf32 \
         recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 recipe-07 \
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
-        recipe-13 recipe-14 recipe-15 recipe-16 \
+        recipe-13 recipe-14 recipe-15 recipe-16 recipe-17 \
+        recipe-20 recipe-21 recipe-22 \
         diagnose-recipe-%
 
 # Re-run a single recipe:  make recipe-11
@@ -22,6 +23,7 @@ all: recipe-00 recipe-00-tf32 \
      recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 \
      recipe-08 recipe-09 recipe-10 recipe-12 \
      recipe-13 recipe-14 recipe-15 recipe-16 \
+     recipe-20 recipe-21 \
      report
 
 env:
@@ -81,9 +83,21 @@ recipe-15:
 recipe-16:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/16_ort_int8_distribution.yaml --out $(RESULTS_DIR)/16_ort_int8_distribution.json
 
+recipe-17:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/17_modelopt_int8_qat.yaml --out $(RESULTS_DIR)/17_modelopt_int8_qat.json
+
+recipe-20:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/20_brevitas_int8_percentile.yaml --out $(RESULTS_DIR)/20_brevitas_int8_percentile.json
+
+recipe-21:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/21_brevitas_int8_mse.yaml --out $(RESULTS_DIR)/21_brevitas_int8_mse.json
+
+recipe-22:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/22_brevitas_int8_entropy.yaml --out $(RESULTS_DIR)/22_brevitas_int8_entropy.json
+
 # Parked recipes keep their JSON on disk for history but are dropped from the
 # ranking. #7/#11 need sparsity-aware training.
-PARKED := trt_int8_sparsity,modelopt_int8_sparsity
+PARKED := brevitas_int8_entropy
 
 report:
 	$(PYTHON) scripts/recommend.py --results-dir $(RESULTS_DIR) --out $(REPORT) --exclude "$(PARKED)"
@@ -99,6 +113,11 @@ diagnose-recipe-%:
 	polygraphy run $$ONNX --validate --log-file $(RESULTS_DIR)/_diag/recipe$*.validate.log || true; \
 	polygraphy run $$ONNX --trt --debug-precision --log-file $(RESULTS_DIR)/_diag/recipe$*.debug_precision.log || true; \
 	echo "logs in $(RESULTS_DIR)/_diag/"
+
+train-qr:
+	bash scripts/run_qr_train_batch.sh
+
+.PHONY: train-qr
 
 clean:
 	rm -rf $(RESULTS_DIR)/*.json $(REPORT) *.engine *.onnx build/ dist/ *.egg-info/
