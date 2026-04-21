@@ -74,16 +74,6 @@ def test_dispatch_ort_cpu_fp32_creates_ort_session(tmp_path, monkeypatch):
     assert session == "stub_session"
 
 
-def test_dispatch_ort_cpu_int8_raises_not_implemented():
-    """INT8 path is Task 4 territory. Until implemented, dispatcher must
-    raise NotImplementedError rather than silently fall through."""
-    from scripts import run_cpu
-
-    recipe = _make_recipe(source="ort_cpu", dtype="int8")
-    with pytest.raises(NotImplementedError, match="Task 4"):
-        run_cpu._prepare_cpu_session(recipe)
-
-
 def test_dispatch_openvino_raises_not_implemented():
     """OpenVINO path is Task 5 territory."""
     from scripts import run_cpu

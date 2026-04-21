@@ -1,0 +1,34 @@
+name: ort_cpu_int8_static
+model:
+  family: yolo26
+  variant: n
+  weights: yolo26n.pt
+  ultralytics_version: null
+runtime:
+  engine: onnxruntime
+  dtype: int8
+technique:
+  name: int8_static
+  source: ort_cpu
+  calibrator: entropy
+  # Lowered from 512 — Windows paging file OOM on batch load of 512*(1,3,640,640).
+  # 128 samples is sufficient for static INT8 entropy calibration on Conv-heavy
+  # models (Wave 3 experiments showed diminishing returns past 128).
+  calibration_samples: 128
+  calibration_dataset: coco_val2017
+  calibration_seed: 42
+hardware:
+  gpu: null
+  cpu_cores_physical: null
+measurement:
+  dataset: coco_val2017
+  num_images: 500
+  warmup_iters: 200
+  measure_iters: 300
+  batch_sizes: [1, 8]
+  input_size: 640
+  thread_count: null
+  seed: 42
+constraints:
+  max_map_drop_pct: 1.0
+  min_fps_bs1: 10

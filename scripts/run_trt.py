@@ -43,7 +43,9 @@ from scripts.measure import (  # noqa: E402
 )
 from scripts import _split  # noqa: E402
 from scripts._weights_io import (  # noqa: E402
+    _build_calib_numpy,
     _export_onnx,
+    _letterbox,
     _load_yolo_for_restore,
     _resolve_weights,
 )
@@ -616,50 +618,6 @@ _SOURCE_TAG = {
 }
 
 
-def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed: int):
-    """Return (N,3,H,W) float32 numpy array for modelopt.onnx calibration.
-
-    Default behavior: REAL images from COCO val (or whatever ``val_yaml``
-    points at). If the yaml is missing or produces no usable images,
-    raises ``RuntimeError`` unless the ``OMNI_ALLOW_RANDOM_CALIB`` env
-    var is set to ``1`` — the random-normal fallback silently tanks mAP
-    (double-digit %p on detection), so making it opt-in prevents
-    debugging wild-goose chases like the Phase 3 sparsify diagnosis.
-    """
-    import numpy as np
-
-    if val_yaml and Path(val_yaml).exists():
-        import cv2
-
-        paths = _resolve_val_image_paths(val_yaml)
-        rng = random.Random(seed)
-        rng.shuffle(paths)
-        paths = paths[:n_samples]
-        buf = []
-        for p in paths:
-            img = cv2.imread(str(p))
-            if img is None:
-                continue
-            buf.append(_letterbox(img, imgsz))  # (3,H,W) float32 [0,1]
-        if buf:
-            return np.stack(buf, axis=0).astype(np.float32)
-
-    if os.environ.get("OMNI_ALLOW_RANDOM_CALIB") != "1":
-        raise RuntimeError(
-            "Calibration data unavailable: neither OMNI_CALIB_YAML nor "
-            "OMNI_COCO_YAML points at a dataset producing readable images. "
-            "Random-normal calibration silently drops INT8 mAP by double "
-            "digits. Set OMNI_CALIB_YAML (or OMNI_COCO_YAML) to a valid "
-            "ultralytics dataset yaml (with a val split pointing at real "
-            "images), or pass OMNI_ALLOW_RANDOM_CALIB=1 to explicitly opt in "
-            "to the random-normal fallback."
-        )
-    print("[warn] OMNI_ALLOW_RANDOM_CALIB=1: using random-normal calibration "
-          "(INT8 mAP will be degraded)", file=sys.stderr)
-    rng_np = np.random.default_rng(seed)
-    return rng_np.standard_normal((n_samples, 3, imgsz, imgsz), dtype=np.float32)
-
-
 def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
                   bs: int) -> tuple[Path, bool]:
     """Dispatch to the right ONNX preparation path based on technique.source.
@@ -684,24 +642,6 @@ def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     if source == "brevitas":
         return _prepare_brevitas_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     raise ValueError(f"unknown technique.source: {source!r}")
-
-
-def _letterbox(img, imgsz: int):
-    """Classic YOLO letterbox: resize keeping aspect ratio, pad to imgsz×imgsz
-    with value 114. Returns CHW float32 in [0, 1], RGB channel order."""
-    import cv2
-    import numpy as np
-
-    h, w = img.shape[:2]
-    r = imgsz / max(h, w)
-    new_h, new_w = int(round(h * r)), int(round(w * r))
-    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    canvas = np.full((imgsz, imgsz, 3), 114, dtype=np.uint8)
-    top = (imgsz - new_h) // 2
-    left = (imgsz - new_w) // 2
-    canvas[top:top + new_h, left:left + new_w] = resized
-    rgb_chw = canvas[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
-    return np.ascontiguousarray(rgb_chw)
 
 
 def _resolve_val_image_paths(yaml_path: str) -> list[str]:
