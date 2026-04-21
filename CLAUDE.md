@@ -19,8 +19,9 @@ doc below for the incompatibility matrix. Full scope + architecture + commands i
 Wave 6 CPU inference shipped 2026-04-21 — see
 [`docs/plans/2026-04-21-wave6-cpu-inference.md`](docs/plans/2026-04-21-wave6-cpu-inference.md)
 and `report_cpu_qr.md` at repo root for the 6-recipe ranking.
-Next plan: [`docs/plans/2026-04-21-wave7-pytorch-tflite-quant.md`](docs/plans/2026-04-21-wave7-pytorch-tflite-quant.md)
-(PyTorch PT2E + TensorFlow Lite quantization, #40–#44).
+Next plan: [`docs/plans/2026-04-21-wave7-pytorch-pt2e-xnnpack.md`](docs/plans/2026-04-21-wave7-pytorch-pt2e-xnnpack.md)
+(PyTorch PT2E + ORT XNNPACK EP, #40–#43 — TFLite dropped after rescope:
+Windows runtime + onnx2tf attention compat too risky for Wave 7 scope).
 
 ## Critical conventions (load-bearing — violating these causes regressions)
 

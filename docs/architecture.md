@@ -220,7 +220,7 @@ Implementation plan: ``docs/superpowers/plans/2026-04-20-qr-training-pipeline.md
 | Wave 4 | Brevitas eager PTQ | #20-#21 | active (#22 parked: no entropy observer) |
 | Wave 5 | Training pipeline (QAT/sparsity) | #07, #11, #17 | active (2026-04-20) |
 | Wave 6 | CPU inference (ORT CPU + OpenVINO) | #30-#35 | active (2026-04-21) |
-| Wave 7 | PyTorch PT2E + TensorFlow Lite | #40-#44 | **planned** (2026-04-21, see `docs/plans/2026-04-21-wave7-pytorch-tflite-quant.md`) |
+| Wave 7 | PyTorch PT2E + ORT XNNPACK EP | #40-#43 | **planned** (2026-04-21, TFLite dropped after rescope; see `docs/plans/2026-04-21-wave7-pytorch-pt2e-xnnpack.md`) |
 
 **Wave 6 실측 ranking** (i7-11375H Tiger Lake, QR dataset, `report_cpu_qr.md`):
 1. `openvino_int8_nncf` — 23.9 fps(bs1), mAP 0.988 (winner)
