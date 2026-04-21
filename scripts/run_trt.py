@@ -42,49 +42,16 @@ from scripts.measure import (  # noqa: E402
     throughput_from_latency,
 )
 from scripts import _split  # noqa: E402
+from scripts._weights_io import (  # noqa: E402
+    _export_onnx,
+    _load_yolo_for_restore,
+    _resolve_weights,
+)
 
 # Module-level override set by run() when _resolve_weights returns a YOLO
 # instance (modelopt_sparsify / modelopt_qat). Reset to None after run()
 # completes to prevent state leaking between unit-test invocations.
 _MAIN_TRAINED_YOLO = None  # type: ignore[var-annotated]
-
-
-def _load_yolo_for_restore(base_path: str):
-    """Load a plain YOLO instance to serve as the architecture skeleton
-    for mto.restore()."""
-    from ultralytics import YOLO
-    return YOLO(base_path)
-
-
-def _resolve_weights(recipe: Recipe):
-    """Return runner input: either a path string, or a YOLO-like object
-    whose ``.model`` has modelopt modules restored.
-
-    - No training: str path (recipe.model.weights).
-    - prune_24 trained: str path to trained_weights/{name}.pt (plain
-      ultralytics checkpoint after prune.remove()).
-    - modelopt_sparsify / modelopt_qat: YOLO instance with mto.restore()
-      applied; downstream _export_onnx accepts YOLO objects directly
-      (see the ``is_path`` branch near line 70).
-    """
-    if recipe.technique.training is None:
-        return recipe.model.weights
-    trained = ROOT / "trained_weights" / f"{recipe.name}.pt"
-    if not trained.exists():
-        raise RuntimeError(
-            f"Recipe {recipe.name!r} requires training but {trained} is "
-            f"missing. Run: python scripts/train.py --recipe "
-            f"recipes/{recipe.name}.yaml"
-        )
-    modifier = recipe.technique.training.modifier
-    if modifier == "prune_24":
-        return str(trained)
-    if modifier in ("modelopt_sparsify", "modelopt_qat"):
-        import modelopt.torch.opt as mto
-        yolo = _load_yolo_for_restore(recipe.model.weights)
-        mto.restore(yolo.model, str(trained))
-        return yolo
-    raise RuntimeError(f"unexpected modifier: {modifier!r}")
 
 
 def _get_weights_or_yolo(recipe: Recipe):
@@ -104,42 +71,6 @@ def _seed_all(seed: int) -> None:
         np.random.seed(seed)
     except Exception:
         pass
-
-
-def _export_onnx(weights, imgsz: int, half: bool, cache_dir: Path,
-                 dynamic: bool = True, tag_suffix: str = "") -> Path:
-    """Export YOLO weights to ONNX, defaulting to dynamic batch so a single
-    ONNX can drive both bs=1 and bs>1 engines.
-
-    ``weights`` accepts either a filesystem path (str/Path) to an ultralytics
-    checkpoint, or a live ``ultralytics.YOLO`` instance (used by the modelopt
-    2:4 sparsify path, which returns an in-memory YOLO whose backbone
-    weights already carry the pruning pattern — re-saving and re-loading
-    would drop ultralytics metadata).
-    """
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    bs_tag = "dyn" if dynamic else "bs1"
-    is_path = isinstance(weights, (str, Path))
-    if is_path:
-        stem = Path(weights).stem
-    else:
-        stem = Path(getattr(weights, "ckpt_path", "yolo") or "yolo").stem
-    tag = f"{stem}_{imgsz}_{'fp16' if half else 'fp32'}{tag_suffix}_{bs_tag}.onnx"
-    cached = cache_dir / tag
-    if cached.exists():
-        return cached
-    if is_path:
-        from ultralytics import YOLO
-        model = YOLO(weights)
-    else:
-        model = weights  # already a YOLO-like wrapper with .export(...)
-    onnx_path = model.export(
-        format="onnx", imgsz=imgsz, half=False, simplify=True, dynamic=dynamic,
-    )
-    src = Path(onnx_path)
-    if src != cached:
-        src.rename(cached)
-    return cached
 
 
 def _apply_modelopt_sparsify(weights: str, imgsz: int):
