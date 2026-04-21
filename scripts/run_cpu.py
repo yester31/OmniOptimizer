@@ -448,14 +448,6 @@ def run(recipe_path: str, out_path: str) -> int:
     _seed_all(recipe.measurement.seed)
 
     env = collect_env()
-    # Wave 6: capture CPU-specific env fields as best-effort. env_lock.py's
-    # full CPU detection arrives in Task 2; for now populate minimally.
-    try:
-        import platform
-
-        env.setdefault("cpu_model", platform.processor() or None)
-    except Exception:
-        pass
 
     imgsz = recipe.measurement.input_size
     started = datetime.now(timezone.utc).isoformat()
