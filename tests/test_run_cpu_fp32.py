@@ -83,12 +83,46 @@ def test_dispatch_openvino_raises_not_implemented():
         run_cpu._prepare_cpu_session(recipe)
 
 
-def test_dispatch_bf16_raises_not_implemented():
-    """BF16 path (Task 4 Step 6) gated on AMX/AVX-512 BF16 hardware."""
+def test_dispatch_bf16_skips_when_cpu_lacks_bf16_and_amx(monkeypatch):
+    """BF16 requires AMX (SPR+) or AVX-512 BF16 (Cooper Lake+). Without
+    either, dispatcher must raise NotImplementedError with a message
+    that run_cpu.run() will surface as 'meets_constraints=False' + a
+    hardware-gate note — not a silent fall-through."""
     from scripts import run_cpu
 
+    monkeypatch.setattr(run_cpu, "_collect_cpu_info",
+                        lambda: {"cpu_flags": ["avx2", "avx512f"]})
     recipe = _make_recipe(source="ort_cpu", dtype="bf16")
-    with pytest.raises(NotImplementedError, match="Task 4"):
+    with pytest.raises(NotImplementedError, match="lacks BF16"):
+        run_cpu._prepare_cpu_session(recipe)
+
+
+def test_dispatch_bf16_raises_unimpl_when_hardware_capable(monkeypatch):
+    """When the host CPU reports AMX or AVX-512 BF16, the hardware gate
+    passes but BF16 inference on ORT CPU EP still isn't wired up (the
+    actual float→bfloat16 model conversion is deferred). The dispatcher
+    must raise a distinct NotImplementedError so it's clear the gate
+    isn't the blocker — the backend work is."""
+    from scripts import run_cpu
+
+    monkeypatch.setattr(run_cpu, "_collect_cpu_info",
+                        lambda: {"cpu_flags": ["avx2", "avx512f", "amx_tile"]})
+    recipe = _make_recipe(source="ort_cpu", dtype="bf16")
+    with pytest.raises(NotImplementedError, match="not yet implemented"):
+        run_cpu._prepare_cpu_session(recipe)
+
+
+def test_dispatch_bf16_cpu_flags_none_treated_as_no_support(monkeypatch):
+    """cpu_flags=None (detection failed or unavailable) is treated as
+    'unknown capability → assume missing', so the recipe still records
+    'BF16 skipped' rather than silently trying to build an unsupported
+    session."""
+    from scripts import run_cpu
+
+    monkeypatch.setattr(run_cpu, "_collect_cpu_info",
+                        lambda: {"cpu_flags": None})
+    recipe = _make_recipe(source="ort_cpu", dtype="bf16")
+    with pytest.raises(NotImplementedError, match="lacks BF16"):
         run_cpu._prepare_cpu_session(recipe)
 
 

@@ -48,7 +48,7 @@ from scripts._weights_io import (  # noqa: E402 — TRT-free import
     _iter_calib_samples,
     _resolve_weights,
 )
-from scripts.env_lock import collect_env  # noqa: E402
+from scripts.env_lock import _collect_cpu_info, collect_env  # noqa: E402
 from scripts.measure import (  # noqa: E402
     measure_cold_start,
     measure_latency,
@@ -423,9 +423,25 @@ def _prepare_cpu_session(recipe: Recipe):
             return _prepare_ort_cpu_int8_dynamic(recipe, _build_ort_session_options)
         return _prepare_ort_cpu_int8_static(recipe, _build_ort_session_options)
     if source == "ort_cpu" and dtype == "bf16":
+        # Task 4 Step 6 hardware gate. BF16 matmul on CPU requires either
+        # AMX tile ops (Sapphire Rapids+) or AVX-512 BF16 (Cooper Lake+ /
+        # Tiger Lake+). Emit distinct NotImplementedError messages so run()
+        # can record the right note in Result.notes — "hardware lacks
+        # support" is not the same failure as "backend work remaining".
+        cpu_info = _collect_cpu_info()
+        flags = set(cpu_info.get("cpu_flags") or [])
+        has_bf16_isa = bool(flags & {"amx_tile", "avx512_bf16"})
+        if not has_bf16_isa:
+            raise NotImplementedError(
+                "ort_cpu + bf16: host CPU lacks BF16 ISA "
+                "(need amx_tile or avx512_bf16; saw flags="
+                f"{sorted(flags) if flags else 'unknown'}). "
+                "Recipe skipped; Result.meets_constraints=False."
+            )
         raise NotImplementedError(
-            "ort_cpu + bf16: implemented by Task 4 Step 6 "
-            "(requires AMX or AVX-512 BF16 hardware)"
+            "ort_cpu + bf16: hardware gate passed but BF16 inference on "
+            "ORT CPU EP is not yet implemented (explicit float→bfloat16 "
+            "model conversion required; tracked in Wave 7 roadmap)."
         )
     if source == "openvino":
         raise NotImplementedError(
