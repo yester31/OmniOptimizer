@@ -7,7 +7,7 @@ REPORT := report.md
         recipe-00 recipe-00-tf32 \
         recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 recipe-07 \
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
-        recipe-13 recipe-14 recipe-15 recipe-16 \
+        recipe-13 recipe-14 recipe-15 recipe-16 recipe-17 \
         recipe-20 recipe-21 recipe-22 \
         diagnose-recipe-%
 
@@ -82,6 +82,9 @@ recipe-15:
 
 recipe-16:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/16_ort_int8_distribution.yaml --out $(RESULTS_DIR)/16_ort_int8_distribution.json
+
+recipe-17:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/17_modelopt_int8_qat.yaml --out $(RESULTS_DIR)/17_modelopt_int8_qat.json
 
 recipe-20:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/20_brevitas_int8_percentile.yaml --out $(RESULTS_DIR)/20_brevitas_int8_percentile.json
