@@ -1,4 +1,14 @@
-# Wave 7: PyTorch PT2E 양자화 + ORT XNNPACK EP
+# Wave 7: PyTorch PT2E 양자화 + ORT XNNPACK EP — **ARCHIVED 2026-04-21**
+
+> **⛔ ARCHIVED**: Wave 7 Task 0 spike(`scripts/_spike_wave7_r3.py`)에서 두 축 모두 BLOCKED 확인. 계획은 학습 자료로 보존.
+> - **R3 PT2E**: `torch.export`가 ultralytics Detect head의 `self.anchors` 재할당 패턴에서 실패 (strict), non-strict는 dict 반환으로 pipeline 미연결.
+> - **R5 XNNPACK**: 현재 `onnxruntime-gpu` wheel에 XNNPACK EP 미포함. 일반 `onnxruntime` wheel 필요 → 별도 venv 전제.
+>
+> 자세한 spike 결과: [`docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md`](../improvements/2026-04-21-wave7-r3-r5-spike-results.md).
+>
+> **후속 방향**: Wave 8 ncnn으로 점프 — 모바일 배포 가치가 더 명확. PT2E는 ExecutorTorch 성숙 시점(2027+)에 재검토.
+
+---
 
 > **Rescope 2026-04-21**: 원안은 PyTorch PT2E + **TensorFlow Lite** 조합이었으나 TFLite Windows runtime 부재(R1) + onnx2tf의 YOLO26n attention 호환 리스크(R2)로 **TFLite 제거**. 대체로 **ORT XNNPACK EP** 채택 — 같은 XNNPACK 커널을 TFLite 무게 없이 기존 onnxruntime 설치로 쓴다. Wave 6 `ort_cpu` 인프라 99% 재사용.
 

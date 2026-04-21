@@ -220,9 +220,9 @@ Implementation plan: ``docs/superpowers/plans/2026-04-20-qr-training-pipeline.md
 | Wave 4 | Brevitas eager PTQ | #20-#21 | active (#22 parked: no entropy observer) |
 | Wave 5 | Training pipeline (QAT/sparsity) | #07, #11, #17 | active (2026-04-20) |
 | Wave 6 | CPU inference (ORT CPU + OpenVINO) | #30-#35 | active (2026-04-21) |
-| Wave 7 | PyTorch PT2E + ORT XNNPACK EP | #40-#43 | **planned** (2026-04-21, TFLite dropped after rescope; see `docs/plans/2026-04-21-wave7-pytorch-pt2e-xnnpack.md`) |
-| Wave 8 | ncnn (모바일 YOLO 표준) | #50-#52 (잠정) | roadmap — Android/iOS 배포 발판 |
-| Wave 9 | DirectML EP (Windows edge) | #60-#62 (잠정) | roadmap — NPU/Arc/Ryzen AI 단일 API, 별도 venv 전략 |
+| Wave 7 | PyTorch PT2E + ORT XNNPACK EP | — | **ARCHIVED** (2026-04-21, Task 0 spike BLOCKED both axes — see `docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md`) |
+| Wave 8 | ncnn 모바일/엣지 편입 | #50-#51 | **planned** (2026-04-21, see `docs/plans/2026-04-21-wave8-ncnn.md`) |
+| Wave 9 | DirectML EP (Windows edge) | #60-#62 (잠정) | roadmap — NPU/Arc/Ryzen AI 단일 API |
 
 **제외된 후보** (2026-04-21 검토): MNN(ncnn과 중복, 영어 문서 얇음), ExecutorTorch(2026 현재 alpha — Wave 10+ 재평가).
 

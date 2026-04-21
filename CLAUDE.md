@@ -19,9 +19,11 @@ doc below for the incompatibility matrix. Full scope + architecture + commands i
 Wave 6 CPU inference shipped 2026-04-21 — see
 [`docs/plans/2026-04-21-wave6-cpu-inference.md`](docs/plans/2026-04-21-wave6-cpu-inference.md)
 and `report_cpu_qr.md` at repo root for the 6-recipe ranking.
-Next plan: [`docs/plans/2026-04-21-wave7-pytorch-pt2e-xnnpack.md`](docs/plans/2026-04-21-wave7-pytorch-pt2e-xnnpack.md)
-(PyTorch PT2E + ORT XNNPACK EP, #40–#43 — TFLite dropped after rescope:
-Windows runtime + onnx2tf attention compat too risky for Wave 7 scope).
+Wave 7 ARCHIVED 2026-04-21 after Task 0 spike blocked both axes (PT2E
+torch.export vs ultralytics Detect head + XNNPACK EP missing from
+onnxruntime-gpu wheel). See `docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md`.
+Next plan: [`docs/plans/2026-04-21-wave8-ncnn.md`](docs/plans/2026-04-21-wave8-ncnn.md)
+(ncnn 모바일/엣지 편입, #50–#51 — YOLO 생태계 표준 모바일 런타임).
 
 ## Critical conventions (load-bearing — violating these causes regressions)
 
