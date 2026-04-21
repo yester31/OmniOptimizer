@@ -16,7 +16,11 @@ Intel Neural Compressor was evaluated (Wave 3) and removed — see the audit
 doc below for the incompatibility matrix. Full scope + architecture + commands in
 [`docs/architecture.md`](docs/architecture.md). Latest audit:
 [`docs/improvements/2026-04-18-trt-modelopt-audit.md`](docs/improvements/2026-04-18-trt-modelopt-audit.md).
-Latest plan: [`docs/plans/2026-04-21-wave6-cpu-inference.md`](docs/plans/2026-04-21-wave6-cpu-inference.md).
+Wave 6 CPU inference shipped 2026-04-21 — see
+[`docs/plans/2026-04-21-wave6-cpu-inference.md`](docs/plans/2026-04-21-wave6-cpu-inference.md)
+and `report_cpu_qr.md` at repo root for the 6-recipe ranking.
+Next plan: [`docs/plans/2026-04-21-wave7-pytorch-tflite-quant.md`](docs/plans/2026-04-21-wave7-pytorch-tflite-quant.md)
+(PyTorch PT2E + TensorFlow Lite quantization, #40–#44).
 
 ## Critical conventions (load-bearing — violating these causes regressions)
 

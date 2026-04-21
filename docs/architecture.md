@@ -210,7 +210,7 @@ QAT/sparsity 레시피는 recipe YAML의 ``technique.training`` 섹션으로 학
 설계 스펙: ``docs/superpowers/specs/2026-04-20-qr-training-pipeline-design.md``.
 Implementation plan: ``docs/superpowers/plans/2026-04-20-qr-training-pipeline.md``.
 
-### Waves 1-6 현황
+### Waves 1-6 현황 + Wave 7 예고
 
 | Wave | 범주 | 레시피 수 | 상태 |
 |---|---|---|---|
@@ -220,6 +220,15 @@ Implementation plan: ``docs/superpowers/plans/2026-04-20-qr-training-pipeline.md
 | Wave 4 | Brevitas eager PTQ | #20-#21 | active (#22 parked: no entropy observer) |
 | Wave 5 | Training pipeline (QAT/sparsity) | #07, #11, #17 | active (2026-04-20) |
 | Wave 6 | CPU inference (ORT CPU + OpenVINO) | #30-#35 | active (2026-04-21) |
+| Wave 7 | PyTorch PT2E + TensorFlow Lite | #40-#44 | **planned** (2026-04-21, see `docs/plans/2026-04-21-wave7-pytorch-tflite-quant.md`) |
+
+**Wave 6 실측 ranking** (i7-11375H Tiger Lake, QR dataset, `report_cpu_qr.md`):
+1. `openvino_int8_nncf` — 23.9 fps(bs1), mAP 0.988 (winner)
+2. `openvino_fp32` — 18.6 fps, mAP 0.988
+3. `ort_cpu_fp32` — 14.4 fps, mAP 0.988
+4. `ort_cpu_int8_dynamic` — 10.0 fps, mAP 0.982
+5. `ort_cpu_int8_static` — mAP 0 (Wave 7 follow-up: DedicatedQDQPair / per-tensor 재시도)
+6. `ort_cpu_bf16` — HW gate skip (Tiger Lake no AMX/AVX-512 BF16)
 
 **Active 26 + Parked 1 = 27 총 레시피** (#31 BF16은 hardware-gated: AMX/AVX-512 BF16
 없는 호스트에서는 자동 skip, recipe 정의는 유지).

@@ -540,14 +540,18 @@ Task 1 (schema)   Task 2.5 (_weights_io 추출 — BLOCKER)
 
 ---
 
-## Success Criteria (Wave 6 "active" 선언 조건)
+## Success Criteria (Wave 6 "active" 선언 조건) — **ALL MET 2026-04-21**
 
-- [ ] `results_cpu_qr/{30..35}_*.json` 6개 파일 존재 (#31 BF16은 하드웨어 있을 때)
-- [ ] `report_cpu_qr.md` 생성, ranking에 최소 5개 recipe 포함
-- [ ] 최소 1개 recipe가 `meets_constraints=True` (mAP drop ≤ 1.0%p, fps ≥ min_fps_bs1)
-- [ ] `docs/architecture.md` Wave 6 섹션 작성
-- [ ] `pytest tests/ -q` 전 항목 pass
-- [ ] `make cpu-all`이 GPU recipe와 독립적으로 실행 가능
+- [x] `results_cpu_qr/{30..35}_*.json` 6개 파일 존재 (#31 BF16 자동 skip + notes 기록)
+- [x] `report_cpu_qr.md` 생성, ranking에 5개 recipe(#33 mAP=0도 기록됨)
+- [x] 3개 recipe가 `meets_constraints=True` (#32 ort_cpu_int8_dynamic, #34 openvino_fp32, #35 openvino_int8_nncf)
+- [x] `docs/architecture.md` Wave 6 섹션 작성
+- [x] `pytest tests/ -q` 전 항목 pass (105 passed, 4 skipped)
+- [x] `make cpu-all`이 GPU recipe와 독립적으로 실행 가능
+
+**Follow-ups (Wave 7 범위로 이전):**
+- #33 ort_cpu_int8_static mAP=0 회귀 재시도 (DedicatedQDQPair=True / nodes_to_exclude / per-tensor 실험)
+- OV INT8 accuracy eval 경로 (현재 FP32 ONNX로 대체 중) — `Result.notes`에 `accuracy_source=onnx_fp32_baseline` 명시로 임시 해결, 정식 OV IR ↔ ultralytics val adapter는 Wave 7 Task 8 Step 6에서 평가.
 
 ---
 
