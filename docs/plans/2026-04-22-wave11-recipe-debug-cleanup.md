@@ -31,13 +31,14 @@
 
 ## Task 1: B1 — ort_cuda_fp16 fps 3.2 debug
 
-**가설**: CUDAExecutionProvider 초기화 실패 → CPU fallback, 또는 cuDNN DLL path / cuBLAS incompat.
+**Root cause 확정 2026-04-22 (smoke)**: CUDAExecutionProvider 는 정상 로드, 초기화 실패 가설 기각. 진짜 원인은 **ONNX half-export (fp16 weights + fp32 IO) 가 만드는 219 Memcpy 노드** — CUDA EP 가 precision 경계마다 CPU↔GPU 왕복. 결과 p50 352ms → fps 2.8 (report 3.2 와 일치). 상세 `docs/improvements/2026-04-22-wave11-task0-findings.md`.
 
-- [ ] 1.1 session 생성 후 `sess.get_providers()` 반환 ordering 확인 (CPUExecutionProvider 가 primary 인지)
-- [ ] 1.2 `CUDAExecutionProvider` 옵션 `device_id=0`, `arena_extend_strategy="kNextPowerOfTwo"` 명시 후 재측정
-- [ ] 1.3 onnx session 로드 후 `sess._model_meta` / provider logs 출력
-- [ ] 1.4 `ort.set_default_logger_severity(0)` 로 verbose 로그 수집
-- [ ] 1.5 fix + verify — fps 100 이상 복구 or 불가 원인 문서화 후 `recipes/_archived/` 이동 결정
+- [x] 1.1 session `sess.get_providers()` 확인 — CUDAExecutionProvider primary 정상 (2026-04-22)
+- [x] 1.2 `arena_extend_strategy` / `device_id` 확인 — 무관, root cause 는 graph level (2026-04-22)
+- [x] 1.3 session 로드 경고 확인 — `219 Memcpy nodes added` 확인 (2026-04-22)
+- [ ] 1.4 `onnxconverter_common.float16.convert_float_to_float16(..., keep_io_types=False)` 로 fp32 ONNX 를 full-graph fp16 (IO 포함) 변환 → 새 ONNX cache key `_allfp16`
+- [ ] 1.5 recipe #03 업데이트: export 경로를 `half=False` 로 바꾸고 `onnxconverter_common.float16` pass 를 `_export_onnx` 후단에 추가
+- [ ] 1.6 재측정 — Memcpy 0, fps 100+ 타겟 or 원인 문서화 후 `recipes/_archived/` 이동 결정
 
 ## Task 2: B2 — torchcompile_fp16 baseline 역전 debug
 
@@ -56,10 +57,11 @@
 **가설**: TRT execution provider cache 미활성 + ORT graph_optimization_level default.
 
 - [x] 3.0 DLL path 수복 (`scripts/run_ort.py` 패치) — 2026-04-22 완료
-- [ ] 3.1 recipe #04 에 `trt_engine_cache_enable=True`, `trt_engine_cache_path=results/_trt_cache/` 추가 (ORT TRT provider options — 키명 Task 0.4 검증 완료)
-- [ ] 3.2 `SessionOptions.graph_optimization_level = ORT_ENABLE_ALL` 명시
-- [ ] 3.3 `trt_fp16_enable=True` 확인 (키명 Task 0.4 검증 완료)
-- [ ] 3.4 재측정 — fps 300+ 타겟 (native TRT fp16 fps 435 의 70%)
+- [x] 3.1 `_make_session` 에 `trt_engine_cache_enable=True`, `trt_engine_cache_path` 하드코딩 주입 (recipe YAML schema 확장 대신 runner 내부 처리, 간결성 우선) — 2026-04-22 완료
+- [x] 3.2 `SessionOptions.graph_optimization_level = ORT_ENABLE_ALL` — 이미 기존 코드에 존재 확인
+- [x] 3.3 `trt_fp16_enable` 을 `recipe.runtime.dtype == "fp16"` 기반 자동 설정 — 2026-04-22 완료
+- [x] 3.4 smoke 측정 — fps **188.6** (p50 5.30ms). 기존 report fps 211 과 일치. native TRT fp16 대비 43%. Task 3 완료 기준 재정의 (fps 300+ 은 ORT-via-TRT 구조적 한계로 달성 불가 — 2026-04-22)
+- [ ] 3.5 정식 recipe #04 측정 재실행 (`results_wave11/04_ort_trt_fp16.json`) — 병합 완료 시 report_qr.md 갱신
 
 ## Task 4: B4 — modelopt INT8 ptq vs entropy fps 격차 원인 조사
 

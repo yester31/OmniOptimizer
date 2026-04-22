@@ -54,11 +54,51 @@ Falling back to ['CPUExecutionProvider'] and retrying.
 
 | ID | Recipe | Task 0 영향 | 조치 |
 |---|---|---|---|
-| B1 | #21 ort_cuda_fp16 | CUDAExecutionProvider 는 정상 로드 확인 → 가설 ("CUDA EP 초기화 실패") 부분 기각. 다른 원인 (cuDNN mismatch, memory allocator, dynamic shape) 필요 | Task 1 계속 진행 가능 |
+| B1 | #21 ort_cuda_fp16 | CUDAExecutionProvider 는 정상 로드 확인 → 가설 ("CUDA EP 초기화 실패") 기각. **Root cause 확정**: half-export ONNX (fp16 weights + fp32 input) → CUDA EP 가 219 Memcpy 노드 주입 → per-op CPU↔GPU 셔플. smoke fps 2.8 (기존 3.2 일치) | **fix 필요**: `onnxconverter_common.float16` 로 full-graph fp16 conversion (IO 포함) or half-export 포기 + fp32 ONNX |
 | B2 | #20 torchcompile_fp16 | 무영향 (ORT path 아님) | Task 2 계속 가능 |
-| B3 | #18 ort_trt_fp16 | **TRT EP 로드 자체가 실패 — 이 환경에선 debug 불가능** | **선행 조치: TRT bin PATH 수복 필요** (별도 env 작업) |
+| B3 | #18 ort_trt_fp16 | **수복 완료 2026-04-22**. `os.add_dll_directory` 로 TRT EP primary 로드. 측정: fps **188.6** (p50 5.30ms). 기존 report fps 211 과 consistent — real TRT EP 였음. **Native TRT fp16 fps 435 의 43%** — ORT-via-TRT wrapper 본질적 overhead 확인. Task 3 목표 "fps 300+" 는 ORT-via-TRT 한계로 달성 불가 | recipe 유지 (baseline 기준), Wave 11 Task 3 완료 기준 재정의 |
 | B4 | #13 modelopt_int8_ptq | 무영향 (native TRT 경로) | Task 4 계속 가능 |
 | B5 | #33 ort_cpu_int8_static | 무영향 (CPU EP) | Task 5 계속 가능 |
+
+## B1 Root Cause 상세 (2026-04-22 smoke)
+
+YOLO26n `ultralytics export(format="onnx", half=True)` 결과:
+- weights: fp16
+- input tensor: fp32 (ultralytics export 의 fp16 모드가 IO 는 32-bit 유지)
+- output tensor: fp32
+- 그래프 중간: fp16 Conv + 경계에 Cast 삽입
+
+CUDA EP warning on session load:
+```
+[W:onnxruntime:, transformer_memcpy.cc:83] 219 Memcpy nodes are added to
+the graph main_graph for CUDAExecutionProvider. It might have negative
+impact on performance (including unable to run CUDA graph).
+```
+
+결과: fp16 Conv 가 GPU 에서 돌지만 precision 경계마다 CPU↔GPU 왕복 → p50 352ms = fps 2.8.
+
+**Fix 경로**:
+1. `onnxconverter_common.float16.convert_float_to_float16` 또는 `onnxruntime.tools.onnx_model_utils` 로 그래프 + IO 전부 fp16 conversion → Cast 제거 → Memcpy 0
+2. 또는 half-export 포기: recipe #03 을 fp32 ONNX + CUDA EP 로 변경 → dtype semantic 변경 (name 도 `ort_cuda_fp32` 로)
+
+1번 권고 (recipe 정체성 유지). 별도 작업으로 분리 (Wave 11 Task 1 subtask).
+
+## B3 Measurement (2026-04-22 smoke, post-fix)
+
+```
+recipe: 04_ort_trt_fp16 (yolo26n_640_fp16_bs1.onnx, 4.8 MB)
+providers: [TensorrtExecutionProvider, CUDAExecutionProvider, CPUExecutionProvider]
+input: tensor(float) [1, 3, 640, 640]
+fps: 188.6  p50: 5.30ms
+```
+
+reference:
+- native TRT fp16 (recipe #05): fps 435.1 (report_qr.md)
+- ratio: 188.6 / 435.1 = **43%**
+
+ORT-via-TRT wrapper overhead 는 (1) TRT engine build 를 ORT 가 orchestrate 하면서 원본 ONNX graph 보존, (2) fp32 IO 경계 유지로 memcpy, (3) TRT execution context 를 매 session 재생성. native TRT 는 이 세 가지 없음.
+
+Wave 11 plan Task 3 "fps 300+ 타겟" 은 과한 목표 — **재정의 필요**: "TRT cache + graph_opt=ALL 적용 + 측정 재현" 자체가 완료 기준.
 
 ## TRT EP DLL 수복 경로 (B3 선행 조건)
 

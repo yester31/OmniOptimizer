@@ -36,8 +36,9 @@ def _add_tensorrt_dll_dir() -> None:
     site_parent = Path(tensorrt.__file__).resolve().parent.parent
     libs_dir = site_parent / "tensorrt_libs"
     if libs_dir.is_dir() and hasattr(os, "add_dll_directory"):
+        # Handle-scoped: does not mutate PATH or interfere with other wheels'
+        # CUDA DLL search (torch/lib/cublas64_12.dll).
         os.add_dll_directory(str(libs_dir))
-        os.environ["PATH"] = str(libs_dir) + os.pathsep + os.environ.get("PATH", "")
 
 
 _add_tensorrt_dll_dir()
@@ -96,7 +97,7 @@ def _export_onnx(weights: str, imgsz: int, half: bool, cache_dir: Path,
     return cached
 
 
-def _make_session(onnx_path: Path, execution_provider: str):
+def _make_session(onnx_path: Path, execution_provider: str, dtype: str = "fp32"):
     import onnxruntime as ort
 
     available = ort.get_available_providers()
@@ -104,11 +105,34 @@ def _make_session(onnx_path: Path, execution_provider: str):
         raise RuntimeError(
             f"{execution_provider} not available. onnxruntime providers: {available}"
         )
-    # Provider-specific tuning can be added here. Keep defaults for v1.
-    providers = [execution_provider, "CPUExecutionProvider"]
+
+    # Wave 11 Task 3 (B3) — TRT EP requires explicit cache + fp16 opt-in.
+    # get_available_providers() listing alone is unreliable (Task 0 finding).
+    if execution_provider == "TensorrtExecutionProvider":
+        trt_cache = ROOT / "results" / "_trt_cache"
+        trt_cache.mkdir(parents=True, exist_ok=True)
+        trt_opts = {
+            "trt_engine_cache_enable": True,
+            "trt_engine_cache_path": str(trt_cache),
+            "trt_fp16_enable": dtype == "fp16",
+        }
+        # Fall-through chain: TRT → CUDA → CPU so ops TRT cannot compile still run on GPU.
+        providers: list = [(execution_provider, trt_opts), "CUDAExecutionProvider", "CPUExecutionProvider"]
+    else:
+        providers = [execution_provider, "CPUExecutionProvider"]
+
     sess_opts = ort.SessionOptions()
     sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    return ort.InferenceSession(str(onnx_path), sess_options=sess_opts, providers=providers)
+    session = ort.InferenceSession(str(onnx_path), sess_options=sess_opts, providers=providers)
+    # Guard: make sure the requested EP actually bound. Silent CPU fallback masks
+    # regressions (Wave 11 Task 0 finding).
+    active = session.get_providers()
+    if active[0] != execution_provider:
+        raise RuntimeError(
+            f"{execution_provider} requested but primary is {active[0]!r}. "
+            f"Active chain: {active}. Check TRT / CUDA DLL deps."
+        )
+    return session
 
 
 def _make_forward(session, input_name: str, input_shape, dtype_np):
@@ -162,7 +186,7 @@ def run(recipe_path: str, out_path: str) -> int:
                                    cache_dir, dynamic=(bs > 1))
         try:
             def _load(p=onnx_for_bs):
-                return _make_session(p, ep)
+                return _make_session(p, ep, dtype=recipe.runtime.dtype)
 
             session, this_cold_ms = measure_cold_start(_load)
             if cold_start_ms is None:
