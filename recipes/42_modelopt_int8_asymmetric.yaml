@@ -1,0 +1,38 @@
+name: modelopt_int8_asymmetric
+model:
+  family: yolo26
+  variant: n
+  weights: yolo26n.pt
+  ultralytics_version: null
+runtime:
+  engine: tensorrt
+  version: null
+  dtype: int8
+technique:
+  name: int8_ptq
+  # Wave 14 A5: modelopt.onnx.quantize asymmetric path.
+  # Task 0 spike confirmed `use_zero_point=False` default; switching to True
+  # emits zero_point != 0 per-tensor → wider dynamic range for skewed
+  # activations. Expect mAP improvement vs #09 entropy on distributions
+  # with non-zero mean (Conv outputs after Sigmoid/ReLU).
+  source: modelopt
+  calibrator: entropy_asymmetric
+  calibration_samples: 512
+  calibration_dataset: coco_val2017
+  calibration_seed: 42
+hardware:
+  gpu: null
+  cuda: null
+  driver: null
+measurement:
+  dataset: coco_val2017
+  num_images: 500
+  warmup_iters: 100
+  measure_iters: 100
+  batch_sizes: [1, 8]
+  input_size: 640
+  gpu_clock_lock: true
+  seed: 42
+constraints:
+  max_map_drop_pct: 1.0
+  min_fps_bs1: 30
