@@ -228,6 +228,9 @@ results_cpu/_onnx/
 results_cpu_qr/_ov_ir/
 results_cpu_qr/_onnx/
 
+# Wave 15 D1.1 — OpenVINO persistent compiled-blob cache
+results_cpu/_ov_cache/
+
 # Wave 8 ncnn spike artifacts (derivable via pnnx, BLOCKED at runtime)
 results_cpu/_ncnn_spike/
 

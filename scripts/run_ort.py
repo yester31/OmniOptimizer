@@ -108,6 +108,14 @@ def _make_session(onnx_path: Path, execution_provider: str, dtype: str = "fp32")
 
     # Wave 11 Task 3 (B3) — TRT EP requires explicit cache + fp16 opt-in.
     # get_available_providers() listing alone is unreliable (Task 0 finding).
+    #
+    # Wave 15 D1.2 — match Wave 14 native TRT defaults on the ORT EP side.
+    # builder_optimization_level=5 runs exhaustive tactic autotune (Wave 14
+    # #40 measured +48% fps on FP16 with this single knob). timing cache
+    # amortizes tactic timings across recipe rebuilds, cutting cold_start_ms
+    # on subsequent runs. Older ORT that doesn't recognize these keys would
+    # raise on session init; the fallback below strips them and retries so
+    # the runner stays compatible.
     if execution_provider == "TensorrtExecutionProvider":
         trt_cache = ROOT / "results" / "_trt_cache"
         trt_cache.mkdir(parents=True, exist_ok=True)
@@ -115,15 +123,40 @@ def _make_session(onnx_path: Path, execution_provider: str, dtype: str = "fp32")
             "trt_engine_cache_enable": True,
             "trt_engine_cache_path": str(trt_cache),
             "trt_fp16_enable": dtype == "fp16",
+            "trt_builder_optimization_level": 5,
+            "trt_timing_cache_enable": True,
+            "trt_timing_cache_path": str(trt_cache),
+            "trt_detailed_build_log": True,
         }
         # Fall-through chain: TRT → CUDA → CPU so ops TRT cannot compile still run on GPU.
         providers: list = [(execution_provider, trt_opts), "CUDAExecutionProvider", "CPUExecutionProvider"]
     else:
+        trt_opts = None
         providers = [execution_provider, "CPUExecutionProvider"]
 
     sess_opts = ort.SessionOptions()
     sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    session = ort.InferenceSession(str(onnx_path), sess_options=sess_opts, providers=providers)
+    try:
+        session = ort.InferenceSession(str(onnx_path), sess_options=sess_opts, providers=providers)
+    except Exception as e:
+        # Wave 15 D1.2 backward-compat: strip new TRT EP keys if this ORT
+        # build rejects them and retry once. Only applies when we actually
+        # sent the Wave 15 additions; other failures propagate.
+        wave15_keys = (
+            "trt_builder_optimization_level",
+            "trt_timing_cache_enable",
+            "trt_timing_cache_path",
+            "trt_detailed_build_log",
+        )
+        if trt_opts is not None and any(k in str(e) for k in wave15_keys):
+            for k in wave15_keys:
+                trt_opts.pop(k, None)
+            providers = [(execution_provider, trt_opts), "CUDAExecutionProvider", "CPUExecutionProvider"]
+            print(f"[warn] ORT rejected Wave 15 TRT EP keys ({e}); retrying with legacy options",
+                  file=sys.stderr)
+            session = ort.InferenceSession(str(onnx_path), sess_options=sess_opts, providers=providers)
+        else:
+            raise
     # Guard: make sure the requested EP actually bound. Silent CPU fallback masks
     # regressions (Wave 11 Task 0 finding).
     active = session.get_providers()
