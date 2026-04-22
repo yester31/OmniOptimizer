@@ -9,9 +9,10 @@ code in this repository. Keep it short; detail lives in `docs/`.
 model + target GPU + constraints (max mAP drop, min fps); it runs a bank of
 (runtime × technique) recipes end-to-end and recommends the winner.
 
-Current scope: YOLO26n, one NVIDIA GPU + x86_64 Intel CPU, 28 recipes across
-GPU (`trt_builtin`, `modelopt`, `ort_quant`, `brevitas`) and CPU (`ort_cpu`,
-`openvino`) backends plus FP32 / TF32 / FP16 / BF16 / INT8 variants.
+Current scope: YOLO26n, one NVIDIA GPU + x86_64 Intel CPU, 29 recipes across
+GPU (`trt_builtin`, `modelopt`, `ort_quant`, `brevitas`, `modelopt_fastnas`)
+and CPU (`ort_cpu`, `openvino`) backends plus FP32 / TF32 / FP16 / BF16 / INT8
+variants.
 Intel Neural Compressor was evaluated (Wave 3) and removed — see the audit
 doc below for the incompatibility matrix. Full scope + architecture + commands in
 [`docs/architecture.md`](docs/architecture.md). Latest audit:
@@ -27,9 +28,76 @@ in onnxruntime-gpu). See
 [`docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md`](docs/improvements/2026-04-21-wave7-r3-r5-spike-results.md)
 and
 [`docs/improvements/2026-04-21-wave8-r1-spike-results.md`](docs/improvements/2026-04-21-wave8-r1-spike-results.md).
-Next candidates (ordered by friction): Wave 9 DirectML EP (ORT-native,
-bypasses converter issues) / Wave 8 rescope with `end2end=False` export
-/ Wave 6 close-out.
+
+Waves 12 and 13 ARCHIVED 2026-04-21 pre-execution after `/gsd-plan-phase`
+cross-verify: Wave 12 (INT4 weight-only) defeated by NVIDIA docs
+("WoQ is GEMM-only, no Conv support" — YOLO26n is Conv-dominant);
+Wave 13 (ONNX autocast/autotune) plan relied on a nonexistent
+`modelopt.onnx.autotune` module and mismatched `convert_to_f16`
+signature. See
+[`docs/improvements/2026-04-21-int4-ampere-not-feasible.md`](docs/improvements/2026-04-21-int4-ampere-not-feasible.md)
+and
+[`docs/improvements/2026-04-21-wave13-api-discovery-blocker.md`](docs/improvements/2026-04-21-wave13-api-discovery-blocker.md).
+
+Wave 10 (FastNAS structured pruning) **SHIPPED 2026-04-22**
+(reopened after initial archive). FastNAS pruning yields only
+15.7% FLOPs cut (FX trace excludes YOLO backbone/neck) but
+combined with `modelopt.onnx.quantize` INT8 entropy produces
+two competitive recipes:
+- `modelopt_fastnas_int8` — Rank 4, fps 716.3, mAP 0.947,
+  engine **5 MB (−88% vs baseline 38 MB)**
+- `modelopt_fastnas_sp_int8` — Rank 5, fps 697.4, mAP 0.948
+  (2:4 sparsity + fine-tune with mask-preservation callback)
+
+Relative to baseline #1 `modelopt_int8_entropy` (fps 763.9):
+FastNAS maintains **93.8% speed while using 12.4% of engine
+size** — primary value is edge/embedded/VRAM-constrained
+deployment. Constraint `max_map_drop_pct: 5.0` (vs baseline
+1.5%p) reflects this trade-off.
+See [`docs/plans/2026-04-21-wave10-modelopt-fastnas-pruning.md`](docs/plans/2026-04-21-wave10-modelopt-fastnas-pruning.md),
+[`docs/improvements/2026-04-21-wave10-r1-spike-results.md`](docs/improvements/2026-04-21-wave10-r1-spike-results.md),
+and [`docs/improvements/2026-04-22-wave10-pruning-extended-eval.md`](docs/improvements/2026-04-22-wave10-pruning-extended-eval.md).
+
+**Critical reopening lesson**: initial archive was caused by
+ultralytics val (e2e with preprocess/postprocess) vs
+`scripts/run_trt.py` (pure CUDA kernel, warmup=100,
+measure=100) protocol mismatch — fps looked 4× lower than
+reality. Phase 7 fair bench via `scripts.measure.measure_latency`
+exposed the bias; Phase 8 `modelopt.onnx.quantization.quantize`
+(not torch-level `mtq.quantize`) on the ONNX directly resolved
+the Detect head "Missing scale" issue.
+
+Active GPU plan: **Wave 9 DirectML EP** (ORT-native, bypasses
+converter issues, covers AMD GPU / Intel Arc / Windows NPU).
+Plan draft pending.
+
+Other candidates (ordered by friction): Wave 8 rescope with
+`end2end=False` export / Wave 6 close-out (#33 mAP=0 debug).
+
+**Plan-writing conventions (learned 2026-04-21/22)**:
+1. External library APIs must be grounded in the repo's actual
+   `__init__.py` / source code, not web docs or ChatGPT answers.
+   Wave 13 failed because docs-based plans cited phantom modules.
+2. FastNAS / NAS frameworks depend heavily on `torch.fx` symbolic
+   trace compatibility. Dynamic control flow + ModuleList-heavy
+   detection models (YOLO family) exclude entire backbones from
+   search space. Confirm trace feasibility per-module before
+   committing to pruning ratio targets.
+3. ModelOpt `mto.save` / `mto.restore` are tuned for
+   architecture-invariant modes (QAT, sparsity). For
+   architecture-changing modes (pruning), prefer ultralytics-style
+   full-model pickle.
+4. **Compare apples-to-apples**: ultralytics `yolo.val()` is e2e
+   (preprocess + inference + postprocess); `scripts/run_trt.py`
+   uses `scripts.measure.measure_latency` (pure CUDA kernel,
+   warmup=100, measure=100, CUDA events). Never compare fps
+   across protocols — rebuild one side to match before making
+   ship/archive decisions.
+5. **`modelopt.onnx.quantization.quantize` is the go-to path** for
+   INT8 QDQ on custom-trained models. Torch-level `mtq.quantize`
+   followed by `torch.onnx.export` crashes with C-level segfault
+   on QuantConv2d in modelopt 0.43. The ONNX-level path injects
+   Q/DQ nodes into a clean FP32 ONNX without wrapping modules.
 
 ## Critical conventions (load-bearing — violating these causes regressions)
 

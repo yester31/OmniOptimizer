@@ -1,0 +1,41 @@
+name: modelopt_fastnas_sp_int8
+# Wave 10 (reopened 2026-04-22): FastNAS pruning + 2:4 sparsity fine-tune
+# → modelopt.onnx.quantize INT8 entropy + TRT SPARSE_WEIGHTS.
+# Pruning + sparsity + fine-tune pre-applied:
+#   trained_weights/23_fastnas_chain_ft/B_final.pt  (30 epoch FT with mask
+#   preservation callback, sparsity=0.500 유지).
+# 이 파일은 modelopt PTQ + TRT INT8 engine build (sparse kernels) 만 수행.
+model:
+  family: yolo26
+  variant: n
+  weights: trained_weights/23_fastnas_chain_ft/B_final.pt
+  ultralytics_version: null
+runtime:
+  engine: tensorrt
+  version: null
+  dtype: int8
+  sparsity: "2:4"              # TRT SPARSE_WEIGHTS hint — weights 실제 2:4 패턴 유지
+technique:
+  name: fastnas_sp_int8_ptq
+  source: modelopt
+  calibrator: entropy
+  calibration_samples: 512
+  calibration_dataset: qr_barcode_val
+  calibration_seed: 42
+hardware:
+  gpu: null
+  cuda: null
+  driver: null
+  requires_compute_capability_min: 7.5
+measurement:
+  dataset: qr_barcode
+  num_images: 133
+  warmup_iters: 100
+  measure_iters: 100
+  batch_sizes: [1, 8]
+  input_size: 640
+  gpu_clock_lock: true
+  seed: 42
+constraints:
+  max_map_drop_pct: 5.0
+  min_fps_bs1: 30

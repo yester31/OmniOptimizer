@@ -1,0 +1,45 @@
+name: modelopt_fastnas_int8
+# Wave 10 (reopened 2026-04-22): FastNAS 구조적 채널 pruning (15.7% FLOPs 감축)
+# → modelopt.onnx.quantize INT8 entropy.
+# Pruning 은 pre-applied (trained_weights/23_fastnas_p1_finetune/weights/best.pt);
+# 이 파일은 modelopt PTQ + TRT INT8 engine build 만 수행.
+# 재현: python scripts/_spike_wave10_p1_finetune.py (60 epoch QR fine-tune)
+#       → python scripts/_spike_wave10_p8_modelopt_onnx.py
+model:
+  family: yolo26
+  variant: n
+  # FastNAS pruned + QR fine-tuned checkpoint.  Override with OMNI_WEIGHTS_OVERRIDE
+  # to re-use this recipe on other pruned backbones.
+  weights: trained_weights/23_fastnas_p1_finetune/weights/best.pt
+  ultralytics_version: null
+runtime:
+  engine: tensorrt
+  version: null
+  dtype: int8
+technique:
+  name: fastnas_int8_ptq
+  source: modelopt
+  calibrator: entropy
+  calibration_samples: 512
+  calibration_dataset: qr_barcode_val
+  calibration_seed: 42
+hardware:
+  gpu: null
+  cuda: null
+  driver: null
+  requires_compute_capability_min: 7.5
+measurement:
+  dataset: qr_barcode
+  num_images: 133
+  warmup_iters: 100
+  measure_iters: 100
+  batch_sizes: [1, 8]
+  input_size: 640
+  gpu_clock_lock: true
+  seed: 42
+constraints:
+  # FastNAS pruning 15.7% + fine-tune 60ep → baseline 0.987 대비 mAP drop 약 4%p.
+  # 엣지/임베디드 타깃(engine 4.7MB, VRAM 4.7MB — baseline 38MB 대비 -88%)
+  # 을 위한 별도 constraint bank. 기존 1.5%p 제약은 본 recipe에 적용 안 함.
+  max_map_drop_pct: 5.0
+  min_fps_bs1: 30

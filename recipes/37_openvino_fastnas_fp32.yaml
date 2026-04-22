@@ -1,0 +1,28 @@
+name: openvino_fastnas_fp32
+# Wave 10 CPU: FastNAS pruned + OpenVINO FP32 (baseline compare #34).
+model:
+  family: yolo26
+  variant: n
+  weights: trained_weights/23_fastnas_p1_finetune/weights/best.pt
+  ultralytics_version: null
+runtime:
+  engine: openvino
+  dtype: fp32
+technique:
+  name: fp32_fastnas
+  source: openvino
+hardware:
+  gpu: null
+  cpu_cores_physical: null
+measurement:
+  dataset: qr_barcode
+  num_images: 133
+  warmup_iters: 200
+  measure_iters: 300
+  batch_sizes: [1, 8]
+  input_size: 640
+  thread_count: null
+  seed: 42
+constraints:
+  max_map_drop_pct: 5.0
+  min_fps_bs1: null

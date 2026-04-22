@@ -229,3 +229,9 @@ results_cpu_qr/_onnx/
 
 # Wave 8 ncnn spike artifacts (derivable via pnnx, BLOCKED at runtime)
 results_cpu/_ncnn_spike/
+
+# Wave 10 spike / session byproducts (derivable, not source of truth)
+.claude/
+logs/
+kernel.errors.txt
+modelopt_search_checkpoint*.pth
