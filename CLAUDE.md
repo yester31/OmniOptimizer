@@ -9,13 +9,15 @@ code in this repository. Keep it short; detail lives in `docs/`.
 model + target GPU + constraints (max mAP drop, min fps); it runs a bank of
 (runtime × technique) recipes end-to-end and recommends the winner.
 
-Current scope: YOLO26n, one NVIDIA GPU + x86_64 Intel CPU, 30 recipes across
-GPU (`trt_builtin`, `modelopt`, `ort_quant`, `modelopt_fastnas`) and CPU
-(`ort_cpu`, `openvino`, `openvino_fastnas`) backends plus FP32 / TF32 /
+Current scope: YOLO26n, one NVIDIA GPU + x86_64 Intel CPU, 28 active recipes
+across GPU (`trt_builtin`, `modelopt`, `ort_quant`, `modelopt_fastnas`) and
+CPU (`ort_cpu`, `openvino`, `openvino_fastnas`) backends plus FP32 / TF32 /
 FP16 / BF16 / INT8 variants.
 Intel Neural Compressor was evaluated (Wave 3) and removed — see the audit
 below. Brevitas recipes (#20-#22) archived 2026-04-22 (redundant with
 `modelopt_int8_entropy`; Q/DQ asymmetry ruled out as cause of fps deficit).
+Wave 11 archived #02 torchcompile_fp16 (torch.compile MSVC blocker on
+Windows) + #03 ort_cuda_fp16 (CUDA EP can't run YOLO26n NMS ops).
 See [`docs/improvements/2026-04-22-brevitas-qdq-audit.md`](docs/improvements/2026-04-22-brevitas-qdq-audit.md).
 doc below for the incompatibility matrix. Full scope + architecture + commands in
 [`docs/architecture.md`](docs/architecture.md). Latest audit:

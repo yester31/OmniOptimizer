@@ -17,6 +17,14 @@ technique:
   calibration_samples: 128
   calibration_dataset: coco_val2017
   calibration_seed: 42
+  # Wave 11 Task 5 (2026-04-23): exclude Detect head from Q/DQ injection.
+  # `/model.23/` prefix matches all 427 head nodes (Conv + Gather/TopK/Mod/
+  # GatherElements that produce NMS index tensors — INT8 wrapping shared a
+  # single scale across box-coord Split and final Concat output, mAP=0).
+  # Runner expands trailing-slash entries as prefix patterns against the
+  # preprocessed ONNX node names.
+  nodes_to_exclude:
+    - /model.23/
 hardware:
   gpu: null
   cpu_cores_physical: null

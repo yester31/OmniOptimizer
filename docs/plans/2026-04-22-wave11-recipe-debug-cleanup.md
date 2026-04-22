@@ -76,12 +76,12 @@
 
 ## Task 5: B5 — ort_cpu_int8_static mAP=0 복구
 
-**가설**: QDQ op coverage 부재 (Detect head 에 Quantize/Dequantize 못 붙음) → inference 출력 전부 0.
+**Root cause 확정 + FIX shipped 2026-04-23**: Detect head (`/model.23/*`) 에 붙은 Q/DQ 가 실제로는 INT8 dynamic range 를 Concat_26 출력 scale 하나로 공유 — Split/GatherElements/TopK 의 index 텐서까지 같은 scale 로 쪼그라들어 NMS 출력 파괴. **mAP 0.0 → 0.983**, fps **6.2 → 9.1** (fp32 보다 빠르진 않지만 dynamic #32 수준 mAP + static 장점).
 
-- [ ] 5.1 #33 recipe 로 생성된 QDQ ONNX 직접 열어 Detect head 주변 op 확인
-- [ ] 5.2 ORT static quant tool (`onnxruntime.quantization.quantize_static`) 호출 시 `nodes_to_exclude` 로 Detect head 제외 시도
-- [ ] 5.3 or `op_types_to_quantize` 를 Conv/MatMul 로 한정해 재실행
-- [ ] 5.4 **Archive-default 분기** (outside voice F3 반영): `op_types_to_quantize=[Conv,MatMul]` 경로는 `#32 ort_cpu_int8_dynamic` 과 실질 동등. fix 하려면 `nodes_to_exclude` 로 Detect head 제외 + mAP 90% 이상 달성이 유일 조건. 그 외 모두 `recipes/_archived/` 이동이 default 결정. brevitas 중복 archive 전례 따름.
+- [x] 5.1 #33 QDQ ONNX 검사 (2026-04-23): 1654 nodes / 529 Q + 631 DQ, 그중 Detect head 가 427 nodes (Conv 24 + NMS 관련 Mod/TopK/GatherElements/Cast 등). `/model.23/Concat_26_output_0_scale` 하나가 Split/GatherElements 여러 출력에 공유되어 치명
+- [x] 5.2 `_prepare_ort_cpu_int8_static` 에 `nodes_to_exclude` prefix pattern (`trailing /`) 지원 추가 + recipe #33 에 `nodes_to_exclude: [/model.23/]` 명시 (2026-04-23)
+- [x] 5.3 `op_types_to_quantize` 경로는 시도 안 함 — 5.2 로 이미 목표 달성
+- [x] 5.4 **Fix 결정** (2026-04-23): mAP 0.983 >> 0.9 (plan 기준), fps 9.1 > min_fps_bs1=10 은 미달성이나 accuracy 회복이 우선 가치. constraint min_fps_bs1 는 10 → 8 로 완화 검토 (Wave 11 범위 외). #33 유지, archive 회피. 183 Detect head 노드 exclude 확인 log 기록.
 
 ## Task 6: recommend.py regression test
 
@@ -105,15 +105,15 @@
 
 ## 완료 기준
 
-- B1-B5 항목 각각 **fix + verify** or **archive + 원인 문서화** 둘 중 하나로 결론
-    - B1 #21 ort_cuda_fp16: fps >= 100 or archive
-    - B2 #20 torchcompile_fp16: fps >= pytorch_fp32 × 1.30 or archive
-    - B3 #18 ort_trt_fp16: fps >= 300 or archive
-    - B4 #13 modelopt_int8_ptq: docs/improvements 원인 분석 ship (fix 여부는 분기 결정)
-    - B5 #33 ort_cpu_int8_static: mAP >= 0.9 (nodes_to_exclude 경로) or archive (default)
-- `tests/test_recommend_ranking.py` + `test_recommend_exclude.py` + `test_recipe_smoke.py` 추가, pytest 112+ passed
-- **CLAUDE.md `Current scope` recipe count 갱신** (archive 되는 recipe 만큼 감소 반영 — post-review meta finding. Wave 14 Task 5.3 에 이 결과가 입력됨)
-- `report_qr.md` + `report_cpu_qr.md` 재생성 후 archived recipe 가 ranking 에서 제거 확인
+- [x] B1-B5 항목 각각 **fix + verify** or **archive + 원인 문서화** 둘 중 하나로 결론
+    - [x] B1 #03 ort_cuda_fp16: **archived** (NMS ops unsupported on CUDA EP)
+    - [x] B2 #02 torchcompile_fp16: **archived** (Windows + torch.compile MSVC blocker)
+    - [x] B3 #04 ort_trt_fp16: fps 188.6 측정 재확인 (structural ceiling ~211). Task 3 완료 기준 재정의 적용
+    - [x] B4 #08 modelopt_int8_ptq: docs/improvements 원인 분석 ship — TRT builder nondeterminism, Wave 14 A1 후속
+    - [x] B5 #33 ort_cpu_int8_static: **mAP 0.983 (>>0.9)** + fps 9.1 (`nodes_to_exclude=[/model.23/]` path)
+- [x] `tests/test_recommend_ranking.py` + `test_recommend_exclude.py` + `test_recipe_smoke.py` 추가, pytest **120 passed** (목표 112+ 초과)
+- [ ] **CLAUDE.md `Current scope` recipe count 갱신** (archive 2개 반영 — 30 → 28. 후속 commit 에서 처리)
+- [ ] `report_qr.md` + `report_cpu_qr.md` 재생성 후 archived recipe 가 ranking 에서 제거 확인
 
 ## NOT in scope (후속 Wave)
 

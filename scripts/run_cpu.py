@@ -374,6 +374,29 @@ def _prepare_ort_cpu_int8_static(recipe: Recipe, session_options_factory: Callab
             return _iter_calib_samples(val_yaml, n_samples, imgsz, seed)
 
         reader = _NumpyReader(_calib_factory, input_name)
+
+        # Expand nodes_to_exclude: entries ending with "/" are prefix patterns
+        # resolved against actual node names in preproc_onnx (Wave 11 Task 5).
+        # Use case: `/model.23/` excludes the entire Detect head (NMS index
+        # tensors are destroyed by INT8 wrapping — GatherElements/TopK/Mod).
+        raw_excludes = list(recipe.technique.nodes_to_exclude or [])
+        expanded_excludes: list[str] = []
+        if raw_excludes:
+            import onnx as _onnx
+            _model = _onnx.load(str(preproc_onnx))
+            _all_names = [n.name for n in _model.graph.node]
+            for pat in raw_excludes:
+                if pat.endswith("/"):
+                    expanded_excludes.extend(n for n in _all_names if n.startswith(pat))
+                else:
+                    expanded_excludes.append(pat)
+            del _model
+            print(
+                f"[info] ort_cpu_int8_static: nodes_to_exclude patterns={raw_excludes} "
+                f"-> {len(expanded_excludes)} node names",
+                file=sys.stderr,
+            )
+
         quantize_static(
             model_input=str(preproc_onnx),
             model_output=str(int8_onnx),
@@ -384,6 +407,7 @@ def _prepare_ort_cpu_int8_static(recipe: Recipe, session_options_factory: Callab
             per_channel=True,
             reduce_range=False,
             calibrate_method=method_map[calibrator],
+            nodes_to_exclude=expanded_excludes or None,
             extra_options={
                 "ActivationSymmetric": True,
                 "WeightSymmetric": True,

@@ -71,25 +71,12 @@ def test_recipe_08_modelopt_int8_ptq_fps_floor():
 
 def test_recipe_33_ort_cpu_int8_static_map_floor():
     """#33 mAP was 0.0 in Wave 6 ship (Detect head Q/DQ destroyed NMS indices).
-    Wave 11 Task 5 excluded Detect head via nodes_to_exclude pattern. Smoke
-    floor 0.5 catches "mAP=0" regressions without demanding the full >0.9
-    target (varies with dataset/weights).
-
-    Dual-source: prefer the Wave 11 re-measurement JSON if present, else fall
-    back to the Wave 6 ship JSON. The Wave 6 JSON has mAP=0.0 (pre-fix); an
-    xfail reflects that it's awaiting the nodes_to_exclude re-run.
+    Wave 11 Task 5 excluded Detect head via nodes_to_exclude=[/model.23/]
+    pattern; re-measurement produced mAP 0.983 / fps 9.1 (up from 0.0 / 6.2).
+    Smoke floor 0.5 catches any future "mAP=0" regression without demanding
+    the exact Wave 11 target (varies with dataset/weights).
     """
-    wave11 = RESULTS_CPU_QR / "33_ort_cpu_int8_static_wave11.json"
-    if wave11.exists():
-        r = Result.model_validate(json.loads(wave11.read_text(encoding="utf-8")))
-    else:
-        r = _load(RESULTS_CPU_QR, "33_ort_cpu_int8_static.json")
-        if r.accuracy.map_50 == 0.0:
-            pytest.xfail(
-                "#33 Wave 6 ship JSON has mAP=0 — Wave 11 Task 5 re-run pending. "
-                "Once the run lands, replace 33_ort_cpu_int8_static.json or drop "
-                "the _wave11 suffix from the output path."
-            )
+    r = _load(RESULTS_CPU_QR, "33_ort_cpu_int8_static.json")
     map_50 = r.accuracy.map_50
     assert map_50 is not None, "map_50 missing — accuracy eval failed"
     assert map_50 > 0.5, (
