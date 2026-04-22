@@ -7,7 +7,7 @@ REPORT_CPU := report_cpu.md
 
 .PHONY: all clean env report \
         recipe-00 recipe-00-tf32 \
-        recipe-01 recipe-02 recipe-04 recipe-05 recipe-06 recipe-07 \
+        recipe-01 recipe-04 recipe-05 recipe-06 recipe-07 \
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
         recipe-13 recipe-14 recipe-15 recipe-16 recipe-17 \
         recipe-30 recipe-31 recipe-32 recipe-33 recipe-34 recipe-35 \
@@ -23,7 +23,7 @@ REPORT_CPU := report_cpu.md
 # the training pipeline lands. The targets below still exist so you can run
 # them manually (e.g. `make recipe-11`).
 all: recipe-00 recipe-00-tf32 \
-     recipe-01 recipe-02 recipe-04 recipe-05 recipe-06 \
+     recipe-01 recipe-04 recipe-05 recipe-06 \
      recipe-08 recipe-09 recipe-10 recipe-12 \
      recipe-13 recipe-14 recipe-15 recipe-16 \
      report
@@ -39,9 +39,6 @@ recipe-00-tf32:
 
 recipe-01:
 	$(PYTHON) scripts/run_pytorch.py --recipe $(RECIPES_DIR)/01_pytorch_fp32.yaml --out $(RESULTS_DIR)/01_pytorch_fp32.json
-
-recipe-02:
-	$(PYTHON) scripts/run_pytorch.py --recipe $(RECIPES_DIR)/02_torchcompile_fp16.yaml --out $(RESULTS_DIR)/02_torchcompile_fp16.json
 
 recipe-04:
 	$(PYTHON) scripts/run_ort.py --recipe $(RECIPES_DIR)/04_ort_trt_fp16.yaml --out $(RESULTS_DIR)/04_ort_trt_fp16.json

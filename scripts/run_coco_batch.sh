@@ -11,7 +11,7 @@ mkdir -p results
 
 ORDER=(
     00_trt_fp32 00_trt_fp32_tf32
-    01_pytorch_fp32 02_torchcompile_fp16
+    01_pytorch_fp32
     04_ort_trt_fp16
     05_trt_fp16 06_trt_int8_ptq
     08_modelopt_int8_ptq 09_modelopt_int8_entropy
@@ -22,7 +22,7 @@ ORDER=(
 
 declare -A RUNNER=(
     [00_trt_fp32]=run_trt [00_trt_fp32_tf32]=run_trt
-    [01_pytorch_fp32]=run_pytorch [02_torchcompile_fp16]=run_pytorch
+    [01_pytorch_fp32]=run_pytorch
     [04_ort_trt_fp16]=run_ort
     [05_trt_fp16]=run_trt [06_trt_int8_ptq]=run_trt
     [08_modelopt_int8_ptq]=run_trt [09_modelopt_int8_entropy]=run_trt

@@ -42,13 +42,15 @@
 
 ## Task 2: B2 — torchcompile_fp16 baseline 역전 debug
 
-**가설**: `torch.compile(model)` default mode 는 inductor graph 재컴파일 반복. `reduce-overhead` / `max-autotune` 미적용.
+**Root cause 2026-04-22**: 기존 result JSON notes 에 이미 기록된 대로 `torch.compile unavailable, fell back to eager: TritonMissing`. fps 39 는 torch.compile 이 아니라 **eager fp16** 의 측정값. eager fp16 이 eager fp32 (46.5) 보다 느린 건 YOLO26n Conv kernel 의 fp16 dispatch 가 suboptimal 한 정상 현상.
 
-- [ ] 2.1 `scripts/run_pytorch.py::_prepare_torchcompile` 현재 compile 호출 설정 확인
-- [ ] 2.2 `mode="reduce-overhead"` 로 변경 후 warmup **200** / measure 100 재측정 (warmup 200 근거: torch.compile inductor 초기 컴파일·autotune 이 40-60 iter 에 걸쳐 변동, 기존 default 100 으로는 측정 구간 진입 시점에 안정되지 않음 — post-review meta finding)
-- [ ] 2.3 `mode="max-autotune"` 비교 (build time 수 배 증가 대가로 런타임 fps 이득)
-- [ ] 2.4 ultralytics YOLO 가 사용자 지정 `forward_impl` 을 호출하는 방식 확인 — compile hook 가 detect head 까지 미치는지
-- [ ] 2.5 fix + verify — fps >= pytorch_fp32 (46.5) + 30% 달성
+**Resolution: Archive**. 이번 세션 (2026-04-22) 에 triton-windows 3.6 설치 시도 + triton_key shim 성공 + `mode="reduce-overhead"` 로 진행 → 그러나 torch 2.8 inductor 가 YOLO 같은 복잡 graph 에 대해 kernel codegen 에서 **C compiler (MSVC) 을 요구** — `RuntimeError: Failed to find C compiler`. VS Build Tools (~2GB) 미설치 환경에서 torch.compile 불가. 사용자 결정 2026-04-22: VS Build Tools 설치 건너뛰고 archive.
+
+- [x] 2.1 `scripts/run_pytorch.py` 의 `torch.compile(mode="reduce-overhead")` 호출 확인 (2026-04-22 완료)
+- [x] 2.2 triton-windows 3.6 설치 후 mode="reduce-overhead" 재시도 → C compiler 요구로 fail (2026-04-22)
+- [x] 2.3 `mode="max-autotune"` 은 reduce-overhead 보다 더 aggressive codegen — 같은 C compiler blocker 로 fail 예상, 시도 생략
+- [x] 2.4 ultralytics forward_impl 조사: inner_model (yolo.model) 을 compile 하지만 YOLO 의 Detect head 동적 anchor 생성이 inductor 로 codegen 됨 → MSVC 필요 근본 원인 (2026-04-22)
+- [x] 2.5 **Archive 결정** — recipe #02 → `recipes/_archived/`, results/_archived/, results_qr/_archived/. Makefile + batch scripts 에서 제거. run_pytorch.py 에 triton_key shim 은 dormant 로 유지 (기록 + 향후 재시도용).
 
 ## Task 3: B3 — ort_trt_fp16 fps 211 개선
 
