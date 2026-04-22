@@ -1,6 +1,8 @@
 name: openvino_fastnas_int8_nncf
 # Wave 10 (reopened 2026-04-22) — CPU: FastNAS pruned + OpenVINO INT8 NNCF.
 # baseline compare: #35 openvino_int8_nncf (fps_bs1=23.9, mAP=0.988).
+# weights: shared with #23 — see docs/improvements/2026-04-22-wave10-pruning-extended-eval.md
+# for the FastNAS prune + QR fine-tune reproduction procedure.
 model:
   family: yolo26
   variant: n

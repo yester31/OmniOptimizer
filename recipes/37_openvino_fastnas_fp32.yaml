@@ -1,5 +1,7 @@
 name: openvino_fastnas_fp32
 # Wave 10 CPU: FastNAS pruned + OpenVINO FP32 (baseline compare #34).
+# weights: shared with #23 — see docs/improvements/2026-04-22-wave10-pruning-extended-eval.md
+# for the FastNAS prune + QR fine-tune reproduction procedure.
 model:
   family: yolo26
   variant: n
