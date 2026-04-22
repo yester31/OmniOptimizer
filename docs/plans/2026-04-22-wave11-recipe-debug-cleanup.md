@@ -67,12 +67,12 @@
 
 ## Task 4: B4 — modelopt INT8 ptq vs entropy fps 격차 원인 조사
 
-**가설**: calibrator 차이 → activation scale 범위 분포 차이 → TRT kernel tactic 선택 분기.
+**Root cause 확정 2026-04-23**: 주요 변동 요인은 **TRT 빌더 autotune nondeterminism**. calibrator 효과는 체계적으로 존재하되 현재 단일 측정 순위는 noise 로 뒤집힐 여지. 상세 `docs/improvements/2026-04-23-modelopt-ptq-tactic-analysis.md`.
 
-- [ ] 4.1 #13 `modelopt_int8_ptq` 와 #09 `modelopt_int8_entropy` 의 ONNX Q/DQ 노드 수 / scale 분포 비교 (`onnx.load` + inspect)
-- [ ] 4.2 `trt-engine-explorer` 또는 `nvinfer.Runtime.get_layer_info` 로 engine 내 tactic 비교
-- [ ] 4.3 root cause 문서화 → `docs/improvements/2026-04-23-modelopt-ptq-tactic-analysis.md`
-- [ ] 4.4 분기: 원인이 calibrator 본질이면 **문서화만**, recipe 수정 범위 밖. 해결 가능하면 `tactic_sources` or `builder_optimization_level` 로 ptq 쪽 개선.
+- [x] 4.1 #08 `modelopt_int8_ptq` vs #09 `modelopt_int8_entropy` vs #10 `modelopt_int8_percentile` ONNX Q/DQ 노드 수 / scale 분포 비교 (2026-04-23) — Q/DQ 노드 수 및 weight scale 완전 동일, activation scale 만 차이 (max 1.19, entropy 0.66, percentile 1.19)
+- [x] 4.2 Engine binary 크기 / md5 비교 (2026-04-23) — max 와 percentile 의 ONNX 은 **byte-identical** 이지만 engine 은 다른 md5 + 같은 크기, fps 는 430 vs 755 (1.76× 격차). nondeterminism 직접 증거.
+- [x] 4.3 root cause 문서화 → `docs/improvements/2026-04-23-modelopt-ptq-tactic-analysis.md` (2026-04-23)
+- [x] 4.4 분기 결정 (2026-04-23): **문서화만**. fix path 없음 — calibrator 이름으로 재현 가능한 결정적 차이 아님. Wave 14 A1 `builder_optimization_level=5` 가 진짜 해결 경로 (autotune 공간 확장으로 stabilization + ceiling lift).
 
 ## Task 5: B5 — ort_cpu_int8_static mAP=0 복구
 
