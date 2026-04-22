@@ -240,19 +240,19 @@ Implementation time: Lanes A/B/C/D = max(30m, 30m, 1h, 15m) = **1h**. Measuremen
 
 ## 7. Completion checklist
 
-- [ ] feat/wave15-tuning 브랜치 생성 (✅ 2026-04-23)
-- [ ] docs/plans/2026-04-23-wave15-audit-driven-tuning.md 작성 (✅ 이 문서)
-- [ ] D1.1 OV CACHE_DIR 구현
-- [ ] D1.2 ORT TRT EP 옵션 구현
-- [ ] D3 `build_ceiling_s` schema + run_trt.py 수정
-- [ ] D4 테스트 4종 작성
-- [ ] pytest 전체 green
-- [ ] 2개 commit 최소 (D1 no-regret, D2-D3 opt-in + schema)
-- [ ] D2 A/B 측정 (GPU 5개 레시피)
-- [ ] 결과 반영하여 rollback-trigger 맞은 recipe 처리
-- [ ] docs/improvements/2026-04-23-wave15-results.md 작성
-- [ ] recipes/README.md + CLAUDE.md 업데이트
-- [ ] PR 생성 → merge
+- [x] feat/wave15-tuning 브랜치 생성 (2026-04-23)
+- [x] docs/plans/2026-04-23-wave15-audit-driven-tuning.md 작성 (이 문서)
+- [x] D1.1 OV CACHE_DIR 구현
+- [x] D1.2 ORT TRT EP 옵션 구현 (+ backward-compat fallback)
+- [x] D3 `build_ceiling_s` schema + run_trt.py 수정
+- [x] D4 테스트 4종 작성 (test_schema_wave15, test_recipe_bank_validate, test_ov_cache_dir, test_run_ort_trt_opts = 42 new tests)
+- [x] pytest 전체 green (179 passed)
+- [x] commits 4개 (plan/docs, D1 no-regret, D3 schema, D2-rollback)
+- [x] D2 A/B 측정 — **ROLLBACK** for #09/#12/#42 (INT8 modelopt 근처 ceiling, opt_level=5 regression)
+- [x] 결과 반영: 3개 YAML 원복, baseline JSON 복원, failed engines 보존
+- [x] docs/improvements/2026-04-23-wave15-results.md 작성 (negative result documented)
+- [x] recipes/README.md + CLAUDE.md 업데이트
+- [ ] PR 생성 → merge (user-driven)
 
 ---
 

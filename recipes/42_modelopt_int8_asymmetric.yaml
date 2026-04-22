@@ -8,6 +8,10 @@ runtime:
   engine: tensorrt
   version: null
   dtype: int8
+  # Wave 15 D2 attempted opt_level=5 here and ROLLED BACK after measurement:
+  # bs1 770.5 -> 756.7 (-1.8%), bs8 1080 -> 986 (-9%) (2026-04-23). This is
+  # the recipe bank's fps TOP; preserving opt_level=3 asymmetric. See #09 for
+  # full analysis. Evidence: docs/improvements/2026-04-23-wave15-results.md.
 technique:
   name: int8_ptq
   # Wave 14 A5: modelopt.onnx.quantize asymmetric path.

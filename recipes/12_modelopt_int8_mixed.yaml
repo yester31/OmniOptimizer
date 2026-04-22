@@ -8,6 +8,9 @@ runtime:
   engine: tensorrt
   version: null
   dtype: int8
+  # Wave 15 D2 attempted opt_level=5 here and ROLLED BACK after measurement:
+  # bs1 -2.3% and bs8 -49% (2026-04-23). See #09 for full analysis. Evidence:
+  # docs/improvements/2026-04-23-wave15-results.md.
 technique:
   name: int8_ptq_mixed
   source: modelopt
