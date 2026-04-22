@@ -1,0 +1,57 @@
+{
+  "recipe": "ort_cpu_int8_static",
+  "started_at": "2026-04-22T10:05:51.000793+00:00",
+  "finished_at": "2026-04-22T10:23:57.168767+00:00",
+  "env": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu_compute_capability": "8.6",
+    "cuda": "12.9",
+    "cudnn": "91002",
+    "driver": "576.80",
+    "tensorrt": "10.16.0.72",
+    "os": "Windows 11",
+    "python": "3.13.3",
+    "torch": "2.8.0+cu129",
+    "onnxruntime": "1.22.0",
+    "ultralytics": "8.4.27",
+    "cpu_model": "11th Gen Intel(R) Core(TM) i7-11375H @ 3.30GHz",
+    "cpu_cores_physical": 4,
+    "cpu_flags": [
+      "avx",
+      "avx2",
+      "avx512_vnni",
+      "avx512bw",
+      "avx512cd",
+      "avx512dq",
+      "avx512f",
+      "avx512vl",
+      "fma",
+      "sse4_1",
+      "sse4_2"
+    ],
+    "openvino": "2026.1.0-21367-63e31528c62-releases/2026/1"
+  },
+  "model_size_mb": null,
+  "latency_ms": {
+    "p50": 109.91199995623901,
+    "p95": 297.6692399475724,
+    "p99": 398.7065159482877,
+    "p50_gpu": null,
+    "p95_gpu": null,
+    "p99_gpu": null,
+    "stddev_ms": 67.84732097928999
+  },
+  "throughput_fps": {
+    "bs1": 9.098187644644312,
+    "bs8": 7.73446984878354
+  },
+  "peak_gpu_mem_mb": null,
+  "peak_gpu_mem_mb_nvml_delta": null,
+  "cold_start_ms": 2623.4353000763804,
+  "accuracy": {
+    "map_50": 0.9833102889520362,
+    "map_50_95": 0.9247979354557165
+  },
+  "meets_constraints": false,
+  "notes": null
+}

@@ -1,0 +1,45 @@
+{
+  "recipe": "modelopt_fastnas_sp_int8",
+  "started_at": "2026-04-22T03:37:55.781609+00:00",
+  "finished_at": "2026-04-22T03:37:55.781609+00:00",
+  "env": {
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu_compute_capability": null,
+    "cuda": "12.9",
+    "cudnn": null,
+    "driver": null,
+    "tensorrt": "10.16.0.72",
+    "os": "Windows 11",
+    "python": "3.13.3",
+    "torch": "2.8.0+cu129",
+    "onnxruntime": null,
+    "ultralytics": null,
+    "cpu_model": null,
+    "cpu_cores_physical": null,
+    "cpu_flags": null,
+    "openvino": null
+  },
+  "model_size_mb": 4.717156,
+  "latency_ms": {
+    "p50": 1.4338500332087278,
+    "p95": 1.7440600029658526,
+    "p99": 1.8110269284807152,
+    "p50_gpu": 1.176576018333435,
+    "p95_gpu": null,
+    "p99_gpu": null,
+    "stddev_ms": 0.16614707842658652
+  },
+  "throughput_fps": {
+    "bs1": 697.4230057812666,
+    "bs8": null
+  },
+  "peak_gpu_mem_mb": 4.69580078125,
+  "peak_gpu_mem_mb_nvml_delta": 0.0,
+  "cold_start_ms": null,
+  "accuracy": {
+    "map_50": 0.9477763079378896,
+    "map_50_95": 0.8016039564345355
+  },
+  "meets_constraints": true,
+  "notes": "Wave 10 reopened 2026-04-22. FastNAS pruning (15.7% FLOPs) pre-applied + QR fine-tuned. modelopt.onnx.quantize INT8 entropy QDQ (223 Q / 223 DQ, Detect head 42 Q/DQ pairs). Engine 4.72MB (-88% vs baseline 38MB). mAP drop vs baseline 0.988: 4.02%p. bs=8 not measured (engine built bs=1 only)."
+}

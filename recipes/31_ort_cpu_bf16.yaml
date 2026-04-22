@@ -1,0 +1,32 @@
+name: ort_cpu_bf16
+model:
+  family: yolo26
+  variant: n
+  weights: yolo26n.pt
+  ultralytics_version: null
+runtime:
+  engine: onnxruntime
+  dtype: bf16
+technique:
+  name: bf16
+  source: ort_cpu
+hardware:
+  gpu: null
+  cpu_cores_physical: null
+  # BF16 inference requires AMX (Sapphire Rapids+) or AVX-512 BF16
+  # (Cooper Lake+ / Tiger Lake+). Hosts without either ISA see the
+  # recipe skipped via run_cpu's hardware gate with notes recorded.
+measurement:
+  dataset: coco_val2017
+  num_images: 500
+  warmup_iters: 200
+  measure_iters: 300
+  batch_sizes: [1, 8]
+  input_size: 640
+  thread_count: null
+  seed: 42
+constraints:
+  max_map_drop_pct: 1.0
+  # BF16 is a baseline dtype (not compressed weights) — fps threshold
+  # is reserved for INT8 recipes that target VNNI speedup.
+  min_fps_bs1: null

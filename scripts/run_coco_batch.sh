@@ -11,26 +11,24 @@ mkdir -p results
 
 ORDER=(
     00_trt_fp32 00_trt_fp32_tf32
-    01_pytorch_fp32 02_torchcompile_fp16
-    03_ort_cuda_fp16 04_ort_trt_fp16
+    01_pytorch_fp32
+    04_ort_trt_fp16
     05_trt_fp16 06_trt_int8_ptq
     08_modelopt_int8_ptq 09_modelopt_int8_entropy
     10_modelopt_int8_percentile 12_modelopt_int8_mixed
     13_ort_int8_minmax 14_ort_int8_entropy
     15_ort_int8_percentile 16_ort_int8_distribution
-    20_brevitas_int8_percentile 21_brevitas_int8_mse
 )
 
 declare -A RUNNER=(
     [00_trt_fp32]=run_trt [00_trt_fp32_tf32]=run_trt
-    [01_pytorch_fp32]=run_pytorch [02_torchcompile_fp16]=run_pytorch
-    [03_ort_cuda_fp16]=run_ort [04_ort_trt_fp16]=run_ort
+    [01_pytorch_fp32]=run_pytorch
+    [04_ort_trt_fp16]=run_ort
     [05_trt_fp16]=run_trt [06_trt_int8_ptq]=run_trt
     [08_modelopt_int8_ptq]=run_trt [09_modelopt_int8_entropy]=run_trt
     [10_modelopt_int8_percentile]=run_trt [12_modelopt_int8_mixed]=run_trt
     [13_ort_int8_minmax]=run_trt [14_ort_int8_entropy]=run_trt
     [15_ort_int8_percentile]=run_trt [16_ort_int8_distribution]=run_trt
-    [20_brevitas_int8_percentile]=run_trt [21_brevitas_int8_mse]=run_trt
 )
 
 for r in "${ORDER[@]}"; do

@@ -214,6 +214,7 @@ __marimo__/
 results/_engines/
 results/_onnx/
 results/_trt_timing.cache
+results/_trt_cache/
 results/_diag/
 results/_calib_eval_split/
 runs/
@@ -226,3 +227,13 @@ results_cpu/_ov_ir/
 results_cpu/_onnx/
 results_cpu_qr/_ov_ir/
 results_cpu_qr/_onnx/
+
+# Wave 8 ncnn spike artifacts (derivable via pnnx, BLOCKED at runtime)
+results_cpu/_ncnn_spike/
+
+# Wave 10 spike / session byproducts (derivable, not source of truth)
+.claude/
+logs/
+kernel.errors.txt
+modelopt_search_checkpoint*.pth
+.venv_dml/

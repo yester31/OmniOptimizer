@@ -1,0 +1,35 @@
+name: openvino_fastnas_int8_nncf
+# Wave 10 (reopened 2026-04-22) — CPU: FastNAS pruned + OpenVINO INT8 NNCF.
+# baseline compare: #35 openvino_int8_nncf (fps_bs1=23.9, mAP=0.988).
+# weights: shared with #23 — see docs/improvements/2026-04-22-wave10-pruning-extended-eval.md
+# for the FastNAS prune + QR fine-tune reproduction procedure.
+model:
+  family: yolo26
+  variant: n
+  weights: trained_weights/23_fastnas_p1_finetune/weights/best.pt
+  ultralytics_version: null
+runtime:
+  engine: openvino
+  dtype: int8
+technique:
+  name: int8_nncf_fastnas
+  source: openvino
+  calibrator: nncf
+  calibration_samples: 300
+  calibration_dataset: qr_barcode_val
+  calibration_seed: 42
+hardware:
+  gpu: null
+  cpu_cores_physical: null
+measurement:
+  dataset: qr_barcode
+  num_images: 133
+  warmup_iters: 200
+  measure_iters: 300
+  batch_sizes: [1, 8]
+  input_size: 640
+  thread_count: null
+  seed: 42
+constraints:
+  max_map_drop_pct: 5.0
+  min_fps_bs1: 5

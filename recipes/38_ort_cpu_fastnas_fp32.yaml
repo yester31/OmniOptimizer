@@ -1,0 +1,30 @@
+name: ort_cpu_fastnas_fp32
+# Wave 10 CPU: FastNAS pruned + ONNX Runtime CPU FP32 (baseline compare #30).
+# weights: shared with #23 — see docs/improvements/2026-04-22-wave10-pruning-extended-eval.md
+# for the FastNAS prune + QR fine-tune reproduction procedure.
+model:
+  family: yolo26
+  variant: n
+  weights: trained_weights/23_fastnas_p1_finetune/weights/best.pt
+  ultralytics_version: null
+runtime:
+  engine: onnxruntime
+  dtype: fp32
+technique:
+  name: fp32_fastnas
+  source: ort_cpu
+hardware:
+  gpu: null
+  cpu_cores_physical: null
+measurement:
+  dataset: qr_barcode
+  num_images: 133
+  warmup_iters: 200
+  measure_iters: 300
+  batch_sizes: [1, 8]
+  input_size: 640
+  thread_count: null
+  seed: 42
+constraints:
+  max_map_drop_pct: 5.0
+  min_fps_bs1: null

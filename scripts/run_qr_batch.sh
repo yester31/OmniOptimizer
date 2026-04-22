@@ -13,8 +13,6 @@ declare -A RECIPES=(
     [00_trt_fp32]="run_trt"
     [00_trt_fp32_tf32]="run_trt"
     [01_pytorch_fp32]="run_pytorch"
-    [02_torchcompile_fp16]="run_pytorch"
-    [03_ort_cuda_fp16]="run_ort"
     [04_ort_trt_fp16]="run_ort"
     [05_trt_fp16]="run_trt"
     [06_trt_int8_ptq]="run_trt"
@@ -29,14 +27,12 @@ declare -A RECIPES=(
     [15_ort_int8_percentile]="run_trt"
     [16_ort_int8_distribution]="run_trt"
     [17_modelopt_int8_qat]="run_trt"
-    [20_brevitas_int8_percentile]="run_trt"
-    [21_brevitas_int8_mse]="run_trt"
 )
 
 ORDER=(
     00_trt_fp32 00_trt_fp32_tf32
-    01_pytorch_fp32 02_torchcompile_fp16
-    03_ort_cuda_fp16 04_ort_trt_fp16
+    01_pytorch_fp32
+    04_ort_trt_fp16
     05_trt_fp16 06_trt_int8_ptq
     07_trt_int8_sparsity
     08_modelopt_int8_ptq 09_modelopt_int8_entropy
@@ -46,7 +42,6 @@ ORDER=(
     13_ort_int8_minmax 14_ort_int8_entropy
     15_ort_int8_percentile 16_ort_int8_distribution
     17_modelopt_int8_qat
-    20_brevitas_int8_percentile 21_brevitas_int8_mse
 )
 
 for r in "${ORDER[@]}"; do

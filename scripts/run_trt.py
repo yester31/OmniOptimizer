@@ -43,7 +43,9 @@ from scripts.measure import (  # noqa: E402
 )
 from scripts import _split  # noqa: E402
 from scripts._weights_io import (  # noqa: E402
+    _build_calib_numpy,
     _export_onnx,
+    _letterbox,
     _load_yolo_for_restore,
     _resolve_weights,
 )
@@ -366,245 +368,6 @@ def _prepare_ort_quant_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     return cached
 
 
-def _prepare_brevitas_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
-                           dynamic: bool = True) -> Path:
-    """Quantize via Brevitas (PyTorch-native, eager-mode) and export QDQ ONNX
-    that TensorRT's explicit-quantization path consumes identically to
-    modelopt/ort_quant output.
-
-    Eager-mode layer replacement (Conv2d → QuantConv2d, Linear → QuantLinear)
-    is used in place of Brevitas's graph-mode ``quantize`` because ultralytics'
-    ``YOLO.forward`` uses Python-level list iteration that ``torch.fx`` cannot
-    trace. Eager-mode keeps the original ultralytics module tree intact, so
-    ``yolo.export(format='onnx')`` still reaches its deploy-path wrapper and
-    emits the NMS-ready output layout the evaluation code expects.
-
-    Supported ``technique.calibrator`` values:
-      - ``percentile`` — activation scale from p99.99 of observed values
-      - ``mse``        — Brevitas MSE-minimizing act + weight quantizers
-      - ``entropy``    — NOT SUPPORTED; Brevitas 0.10.x has no entropy/KL
-        observer. Raises NotImplementedError. Recipe #22 is parked.
-
-    Quantizer config enforces the TRT compat checklist:
-      - per-channel symmetric INT8 weights on Conv axis=0
-      - per-tensor symmetric INT8 activations (zero_point=0)
-      - no bias quantization (TRT computes INT32 bias from act*weight scales)
-    """
-    _BREVITAS_ALGOS = ("percentile", "mse")
-    algo = (recipe.technique.calibrator or "percentile").lower()
-    if algo == "entropy":
-        raise NotImplementedError(
-            "brevitas backend: 'entropy' calibrator is not supported — Brevitas "
-            "has no entropy/KL activation observer in 0.10.x. Use 'percentile' "
-            "or 'mse'. Recipe #22 is parked for this reason."
-        )
-    if algo not in _BREVITAS_ALGOS:
-        raise ValueError(
-            f"brevitas backend supports calibrator in {list(_BREVITAS_ALGOS)}, "
-            f"got {algo!r}"
-        )
-
-    # Brevitas 0.10-0.12 pin `dependencies==2.0.1`, whose _check_dunder_name
-    # rejects Brevitas's own internal injector classes. Neutralize it before
-    # any brevitas import. Harmless no-op if the upstream pin is ever relaxed.
-    try:
-        import _dependencies.checks.injector as _dep_inj
-        _dep_inj._check_dunder_name = lambda name: None
-    except ImportError:
-        pass
-
-    try:
-        import torch
-        from torch import nn
-        from brevitas import nn as qnn
-        from brevitas.graph.calibrate import calibration_mode
-        from brevitas.export import export_onnx_qcdq
-        from brevitas.quant.scaled_int import (
-            Int8ActPerTensorFloat,
-            Int8ActPerTensorFloatMSE,
-            Int8WeightPerChannelFloat,
-            Int8WeightPerChannelFloatMSE,
-        )
-    except Exception as e:
-        raise RuntimeError(
-            f"brevitas not available ({type(e).__name__}: {e}). "
-            "Install with `pip install brevitas>=0.10`."
-        ) from e
-
-    n_samples = int(recipe.technique.calibration_samples or 512)
-    seed = int(recipe.technique.calibration_seed or 42)
-    bs_tag = "dyn" if dynamic else "bs1"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cached = cache_dir / (
-        f"{Path(recipe.model.weights).stem}_{imgsz}_brev_{algo}_"
-        f"{n_samples}_s{seed}_{bs_tag}.qdq.onnx"
-    )
-    if cached.exists():
-        print(f"[info] brevitas cache hit: {cached.name}", file=sys.stderr)
-        return cached
-
-    from ultralytics import YOLO
-
-    yolo = _MAIN_TRAINED_YOLO if _MAIN_TRAINED_YOLO is not None else YOLO(recipe.model.weights)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    yolo.model = yolo.model.to(device).eval()
-
-    # Distinct quantizer classes per algorithm so that calibration actually
-    # produces different activation/weight scales. The previous implementation
-    # passed all knobs through kwargs and left mse/entropy at defaults — which
-    # silently produced byte-identical ONNX across all three variants.
-    if algo == "percentile":
-        class _PercentileAct(Int8ActPerTensorFloat):
-            high_percentile_q = 99.99
-            low_percentile_q = 0.01
-        act_quant_cls = _PercentileAct
-        weight_quant_cls = Int8WeightPerChannelFloat
-    elif algo == "mse":
-        act_quant_cls = Int8ActPerTensorFloatMSE
-        weight_quant_cls = Int8WeightPerChannelFloatMSE
-    else:
-        raise AssertionError(f"unreachable algo={algo!r}")
-
-    def _swap_layer(parent: nn.Module, name: str, child: nn.Module):
-        if isinstance(child, nn.Conv2d):
-            new = qnn.QuantConv2d(
-                in_channels=child.in_channels,
-                out_channels=child.out_channels,
-                kernel_size=child.kernel_size,
-                stride=child.stride,
-                padding=child.padding,
-                dilation=child.dilation,
-                groups=child.groups,
-                bias=(child.bias is not None),
-                weight_quant=weight_quant_cls,
-                input_quant=act_quant_cls,
-                bias_quant=None,
-                return_quant_tensor=False,
-            )
-            new.weight.data = child.weight.data.clone()
-            if child.bias is not None:
-                new.bias.data = child.bias.data.clone()
-            new = new.to(device)
-            setattr(parent, name, new)
-            return True
-        if isinstance(child, nn.Linear):
-            new = qnn.QuantLinear(
-                in_features=child.in_features,
-                out_features=child.out_features,
-                bias=(child.bias is not None),
-                weight_quant=weight_quant_cls,
-                input_quant=act_quant_cls,
-                bias_quant=None,
-                return_quant_tensor=False,
-            )
-            new.weight.data = child.weight.data.clone()
-            if child.bias is not None:
-                new.bias.data = child.bias.data.clone()
-            new = new.to(device)
-            setattr(parent, name, new)
-            return True
-        return False
-
-    def _walk(module: nn.Module):
-        replaced = 0
-        for name, child in list(module.named_children()):
-            if _swap_layer(module, name, child):
-                replaced += 1
-            else:
-                replaced += _walk(child)
-        return replaced
-
-    n_swapped = _walk(yolo.model)
-    print(
-        f"[info] brevitas swapped {n_swapped} Conv2d/Linear layers "
-        f"(algo={algo})",
-        file=sys.stderr,
-    )
-
-    val_yaml = _split.calib_yaml()
-    calib_arr = _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
-
-    import numpy as np
-
-    def _batch_iter(arr, bs: int = 8):
-        for i in range(0, len(arr), bs):
-            chunk = arr[i:i + bs]
-            if chunk.ndim == 3:
-                chunk = chunk[None, ...]
-            yield torch.from_numpy(np.ascontiguousarray(chunk)).to(device)
-
-    print(
-        f"[info] brevitas calibrate: algo={algo}, samples={n_samples}, "
-        f"weights={Path(recipe.model.weights).name}",
-        file=sys.stderr,
-    )
-    yolo.model.eval()
-    with torch.no_grad():
-        with calibration_mode(yolo.model):
-            for x in _batch_iter(calib_arr):
-                yolo.model(x)
-
-    # Export via ultralytics' exporter so the inference head wrapper (NMS-ready
-    # output layout) is preserved — raw torch.onnx.export on yolo.model would
-    # emit feature-map outputs that the validator can't consume.
-    # StdQCDQONNXManager globally registers QDQ symbolic functions for
-    # QuantConv2d/QuantLinear; once set_export_mode is on, torch.onnx.export
-    # (called from inside ultralytics.Exporter) emits Q/DQ nodes around the
-    # quantized layers.
-    # Put ultralytics Detect head(s) in export mode so forward() emits the
-    # NMS-ready concatenated tensor instead of a tuple of feature maps.
-    # ultralytics.Exporter would normally do this, but it also deepcopies the
-    # model, which fails on Brevitas quant layers (non-leaf cached tensors).
-    # Bypass Exporter and drive Brevitas's own export_onnx_qcdq directly.
-    try:
-        from ultralytics.nn.modules import Detect
-        detect_heads = [m for m in yolo.model.modules() if isinstance(m, Detect)]
-    except ImportError:
-        detect_heads = []
-    for head in detect_heads:
-        head.export = True
-        head.format = "onnx"
-
-    dummy = torch.zeros((1, 3, imgsz, imgsz), device=device)
-    raw_out = cache_dir / (cached.stem + ".raw.onnx")
-    try:
-        export_onnx_qcdq(
-            yolo.model,
-            args=dummy,
-            export_path=str(raw_out),
-            opset_version=17,
-            dynamic_axes={"images": {0: "batch"}} if dynamic else None,
-            input_names=["images"],
-        )
-    finally:
-        for head in detect_heads:
-            head.export = False
-
-    print(f"[info] brevitas exported raw QDQ onnx: {raw_out.name}", file=sys.stderr)
-
-    try:
-        from onnxruntime.quantization.shape_inference import quant_pre_process
-
-        quant_pre_process(
-            input_model_path=str(raw_out),
-            output_model_path=str(cached),
-            skip_optimization=False,
-            skip_onnx_shape=False,
-            skip_symbolic_shape=False,
-            auto_merge=True,
-            verbose=0,
-        )
-        print(f"[info] brevitas wrote QDQ onnx: {cached}", file=sys.stderr)
-    except Exception as e:
-        print(
-            f"[warn] brevitas preprocess failed ({e}); using raw export",
-            file=sys.stderr,
-        )
-        raw_out.replace(cached)
-
-    return cached
-
-
 # Short tags appear in engine cache filenames. Long ``technique.source`` names
 # push paths past Windows' 260-char MAX_PATH when combined with the
 # imgsz/calibrator/bs/version suffixes already in the tag.
@@ -612,52 +375,7 @@ _SOURCE_TAG = {
     "trt_builtin": "",
     "modelopt": "_modelopt",
     "ort_quant": "_ort",
-    "brevitas": "_brev",
 }
-
-
-def _build_calib_numpy(val_yaml: Optional[str], n_samples: int, imgsz: int, seed: int):
-    """Return (N,3,H,W) float32 numpy array for modelopt.onnx calibration.
-
-    Default behavior: REAL images from COCO val (or whatever ``val_yaml``
-    points at). If the yaml is missing or produces no usable images,
-    raises ``RuntimeError`` unless the ``OMNI_ALLOW_RANDOM_CALIB`` env
-    var is set to ``1`` — the random-normal fallback silently tanks mAP
-    (double-digit %p on detection), so making it opt-in prevents
-    debugging wild-goose chases like the Phase 3 sparsify diagnosis.
-    """
-    import numpy as np
-
-    if val_yaml and Path(val_yaml).exists():
-        import cv2
-
-        paths = _resolve_val_image_paths(val_yaml)
-        rng = random.Random(seed)
-        rng.shuffle(paths)
-        paths = paths[:n_samples]
-        buf = []
-        for p in paths:
-            img = cv2.imread(str(p))
-            if img is None:
-                continue
-            buf.append(_letterbox(img, imgsz))  # (3,H,W) float32 [0,1]
-        if buf:
-            return np.stack(buf, axis=0).astype(np.float32)
-
-    if os.environ.get("OMNI_ALLOW_RANDOM_CALIB") != "1":
-        raise RuntimeError(
-            "Calibration data unavailable: neither OMNI_CALIB_YAML nor "
-            "OMNI_COCO_YAML points at a dataset producing readable images. "
-            "Random-normal calibration silently drops INT8 mAP by double "
-            "digits. Set OMNI_CALIB_YAML (or OMNI_COCO_YAML) to a valid "
-            "ultralytics dataset yaml (with a val split pointing at real "
-            "images), or pass OMNI_ALLOW_RANDOM_CALIB=1 to explicitly opt in "
-            "to the random-normal fallback."
-        )
-    print("[warn] OMNI_ALLOW_RANDOM_CALIB=1: using random-normal calibration "
-          "(INT8 mAP will be degraded)", file=sys.stderr)
-    rng_np = np.random.default_rng(seed)
-    return rng_np.standard_normal((n_samples, 3, imgsz, imgsz), dtype=np.float32)
 
 
 def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
@@ -681,27 +399,7 @@ def _prepare_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         return _prepare_modelopt_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     if source == "ort_quant":
         return _prepare_ort_quant_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
-    if source == "brevitas":
-        return _prepare_brevitas_onnx(recipe, imgsz, cache_dir, dynamic=dynamic), True
     raise ValueError(f"unknown technique.source: {source!r}")
-
-
-def _letterbox(img, imgsz: int):
-    """Classic YOLO letterbox: resize keeping aspect ratio, pad to imgsz×imgsz
-    with value 114. Returns CHW float32 in [0, 1], RGB channel order."""
-    import cv2
-    import numpy as np
-
-    h, w = img.shape[:2]
-    r = imgsz / max(h, w)
-    new_h, new_w = int(round(h * r)), int(round(w * r))
-    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    canvas = np.full((imgsz, imgsz, 3), 114, dtype=np.uint8)
-    top = (imgsz - new_h) // 2
-    left = (imgsz - new_w) // 2
-    canvas[top:top + new_h, left:left + new_w] = resized
-    rgb_chw = canvas[:, :, ::-1].transpose(2, 0, 1).astype(np.float32) / 255.0
-    return np.ascontiguousarray(rgb_chw)
 
 
 def _resolve_val_image_paths(yaml_path: str) -> list[str]:
@@ -1224,7 +922,7 @@ def run(recipe_path: str, out_path: str) -> int:
         finished_at=finished,
         env=env,  # type: ignore[arg-type]
         model_size_mb=None,
-        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99"}}),
+        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99", "stddev_ms"}}),
         throughput_fps=throughput,
         peak_gpu_mem_mb=peak_mem,
         cold_start_ms=cold_start_ms,

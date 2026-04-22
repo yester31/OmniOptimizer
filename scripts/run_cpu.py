@@ -43,10 +43,12 @@ from scripts._schemas import (  # noqa: E402
     load_recipe,
 )
 from scripts._weights_io import (  # noqa: E402 — TRT-free import
+    _build_calib_numpy,
     _export_onnx,
+    _iter_calib_samples,
     _resolve_weights,
 )
-from scripts.env_lock import collect_env  # noqa: E402
+from scripts.env_lock import _collect_cpu_info, collect_env  # noqa: E402
 from scripts.measure import (  # noqa: E402
     measure_cold_start,
     measure_latency,
@@ -138,10 +140,6 @@ def _prepare_ort_cpu_fp32(recipe: Recipe, session_options_factory: Callable):
     import onnxruntime as ort
 
     weights = _resolve_weights(recipe)
-    if not isinstance(weights, (str, Path)):
-        # Wave 5 modelopt-returned YOLO instance — supported but unusual
-        # on CPU. _export_onnx handles both via is_path branch.
-        pass
     imgsz = recipe.measurement.input_size
     onnx_cache = Path("results_cpu/_onnx")
     onnx_path = _export_onnx(weights, imgsz, half=False, cache_dir=onnx_cache,
@@ -159,6 +157,467 @@ def _prepare_ort_cpu_fp32(recipe: Recipe, session_options_factory: Callable):
     return session, input_name, output_names, cold_ms, onnx_path
 
 
+# ---------------------------------------------------------------------------
+# Calibration data builder (Recipe-aware wrapper over _weights_io helper)
+# ---------------------------------------------------------------------------
+
+def _build_calib_numpy_array(recipe: Recipe):
+    """Recipe-aware wrapper around _weights_io._build_calib_numpy.
+
+    Calibration YAML resolution order (Wave 5 pattern carried forward):
+        1. OMNI_CALIB_YAML env var — overrides everything, used when eval
+           and calibration datasets diverge (Wave 5 QR: eval on QR val,
+           calibrate on COCO because QR val has only 133 images).
+        2. OMNI_COCO_YAML env var — default COCO yaml path.
+        3. recipe.technique.calibration_dataset — recipe-declared dataset
+           name (e.g., "coco_val2017").
+
+    Returns (N, 3, imgsz, imgsz) float32 numpy array, N = recipe.technique.
+    calibration_samples or 512.
+    """
+    val_yaml = (
+        os.environ.get("OMNI_CALIB_YAML")
+        or os.environ.get("OMNI_COCO_YAML")
+        or recipe.technique.calibration_dataset
+    )
+    n_samples = recipe.technique.calibration_samples or 512
+    imgsz = recipe.measurement.input_size
+    seed = recipe.technique.calibration_seed or recipe.measurement.seed or 42
+    return _build_calib_numpy(val_yaml, n_samples, imgsz, seed)
+
+
+# ---------------------------------------------------------------------------
+# INT8 paths (Task 4)
+# ---------------------------------------------------------------------------
+
+class _NumpyReader:
+    """onnxruntime CalibrationDataReader adapter.
+
+    Accepts either a pre-built numpy array (N,3,H,W) OR an iterable / factory
+    of (1,3,H,W) samples. The iterable path is the memory-lean option for
+    static quant on memory-constrained hosts (avoids np.stack 2× peak).
+    """
+
+    def __init__(self, samples, input_name: str):
+        self._input_name = input_name
+        self._cached: list = []
+        # Normalize: if samples is a numpy array, wrap as simple iterator.
+        # If it's already an iterable/generator, use it directly. A factory
+        # (callable returning iterable) lets us re-create on rewind() without
+        # exhausting the generator.
+        import numpy as np
+
+        if callable(samples):
+            self._factory = samples
+            self._iter = iter(samples())
+        elif isinstance(samples, np.ndarray):
+            arr = samples
+            self._factory = lambda a=arr: iter(a[i:i + 1] for i in range(len(a)))
+            self._iter = self._factory()
+        else:
+            # Assume it's already an iterator/iterable; single pass only.
+            self._factory = None
+            self._iter = iter(samples)
+
+    def get_next(self):
+        try:
+            sample = next(self._iter)
+        except StopIteration:
+            return None
+        return {self._input_name: sample}
+
+    def rewind(self):
+        if self._factory is not None:
+            self._iter = iter(self._factory())
+        # else: single-pass iterator — rewind is a no-op (ORT calls rewind()
+        # only for multi-pass calibrators; entropy + percentile are single-pass).
+
+
+def _prepare_ort_cpu_int8_dynamic(recipe: Recipe, session_options_factory: Callable):
+    """Dynamic INT8: weight-only quantization + activation scales computed
+    at runtime per batch.
+
+    Trade-off vs static:
+    - Setup simpler (no calibration data)
+    - Runtime slower (~10-20% per ORT benchmarks — activation quantization
+      on every forward)
+    - Accuracy identical for most conv-heavy models (weights dominate)
+    """
+    import onnxruntime as ort
+    from onnxruntime.quantization import QuantType, quantize_dynamic
+
+    weights = _resolve_weights(recipe)
+    imgsz = recipe.measurement.input_size
+    onnx_cache = Path("results_cpu/_onnx")
+    onnx_cache.mkdir(parents=True, exist_ok=True)
+
+    fp32_onnx = _export_onnx(weights, imgsz, half=False, cache_dir=onnx_cache,
+                             dynamic=True)
+    int8_onnx = onnx_cache / f"{recipe.name}_int8_dyn.onnx"
+
+    if not int8_onnx.exists():
+        # CPU EP gotcha: quantize_dynamic + per_channel=True + QInt8 produces
+        # ConvInteger(10) which MLAS does not implement for Conv. The
+        # documented-working combo for dynamic is per_channel=False + QUInt8,
+        # which uses DynamicQuantizeLinear + QLinearConv path. Per-channel
+        # accuracy gain is negligible for dynamic anyway (no calibration).
+        quantize_dynamic(
+            model_input=str(fp32_onnx),
+            model_output=str(int8_onnx),
+            weight_type=QuantType.QUInt8,
+            per_channel=False,
+            reduce_range=False,
+        )
+
+    so = session_options_factory(recipe)
+
+    def _load():
+        return ort.InferenceSession(str(int8_onnx), sess_options=so,
+                                    providers=["CPUExecutionProvider"])
+
+    session, cold_ms = measure_cold_start(_load)
+    input_name = session.get_inputs()[0].name
+    output_names = [o.name for o in session.get_outputs()]
+    return session, input_name, output_names, cold_ms, int8_onnx
+
+
+def _prepare_ort_cpu_int8_static(recipe: Recipe, session_options_factory: Callable):
+    """Static INT8 with QDQ format: activation scales computed offline from
+    calibration data. VNNI-optimized settings.
+
+    Key flags (from Wave 3 P0-A patch — symmetry is non-negotiable on VNNI):
+    - ActivationSymmetric=True, WeightSymmetric=True — required for MLAS
+      INT8 dot-product kernel to avoid zero-point overhead
+    - per_channel=True — per-output-channel weight scales on Conv
+    - AddQDQPairToWeight=True — matches modelopt.onnx quantize convention
+    - DedicatedQDQPair=False — CPU MLAS benefits from fused QDQ pairs
+      (TRT explicit quantization wants True, inverse trade-off).
+      Empirical decision deferred to Task 4 Step 3b (measure both).
+    - reduce_range=False — VNNI full-range OK; pre-VNNI CPUs may need True
+    """
+    import numpy as np
+    import onnxruntime as ort
+    from onnxruntime.quantization import (
+        CalibrationMethod,
+        QuantFormat,
+        QuantType,
+        quantize_static,
+    )
+
+    weights = _resolve_weights(recipe)
+    imgsz = recipe.measurement.input_size
+    onnx_cache = Path("results_cpu/_onnx")
+    onnx_cache.mkdir(parents=True, exist_ok=True)
+
+    fp32_onnx = _export_onnx(weights, imgsz, half=False, cache_dir=onnx_cache,
+                             dynamic=True)
+
+    calibrator = recipe.technique.calibrator or "entropy"
+    method_map = {
+        "minmax": CalibrationMethod.MinMax,
+        "entropy": CalibrationMethod.Entropy,
+        "percentile": CalibrationMethod.Percentile,
+    }
+    if calibrator not in method_map:
+        raise ValueError(
+            f"recipe {recipe.name!r} calibrator={calibrator!r} not supported "
+            f"for ort_cpu int8 static; use one of {list(method_map)}"
+        )
+
+    int8_onnx = onnx_cache / f"{recipe.name}_int8_{calibrator}.onnx"
+
+    if not int8_onnx.exists():
+        # Pre-process (symbolic + ONNX shape inference, optimization) — required
+        # by quantize_static to resolve activation shapes before inserting QDQ
+        # nodes. Without this, ORT 1.22 writes a sibling `-inferred.onnx` it
+        # then fails to re-open. Same pattern as run_trt ort_quant path; use
+        # auto_merge=True for YOLO26n attention blocks (dynamic reshapes).
+        preproc_onnx = onnx_cache / (fp32_onnx.stem + ".ortpp.onnx")
+        if not preproc_onnx.exists():
+            try:
+                from onnxruntime.quantization.shape_inference import quant_pre_process
+                quant_pre_process(
+                    input_model_path=str(fp32_onnx),
+                    output_model_path=str(preproc_onnx),
+                    skip_optimization=False,
+                    skip_onnx_shape=False,
+                    skip_symbolic_shape=False,
+                    auto_merge=True,
+                    verbose=0,
+                )
+            except Exception as e:
+                print(f"[warn] ort_cpu static preprocess failed ({e}); using raw ONNX",
+                      file=sys.stderr)
+                preproc_onnx = fp32_onnx
+
+        # Discover ONNX input name from the preprocessed model so the reader
+        # tensor key matches.
+        tmp_sess = ort.InferenceSession(
+            str(preproc_onnx), providers=["CPUExecutionProvider"],
+        )
+        input_name = tmp_sess.get_inputs()[0].name
+        del tmp_sess
+
+        # Streaming calibration: factory re-creates iterator on each pass
+        # (entropy/percentile need 2 passes — first for histogram, second
+        # for threshold). No bulk np.stack allocation, so 128-sample calib
+        # fits on memory-constrained hosts (~5 MiB peak vs ~1.2 GiB bulk).
+        val_yaml = (
+            os.environ.get("OMNI_CALIB_YAML")
+            or os.environ.get("OMNI_COCO_YAML")
+            or recipe.technique.calibration_dataset
+        )
+        n_samples = recipe.technique.calibration_samples or 128
+        seed = recipe.technique.calibration_seed or recipe.measurement.seed or 42
+
+        def _calib_factory():
+            return _iter_calib_samples(val_yaml, n_samples, imgsz, seed)
+
+        reader = _NumpyReader(_calib_factory, input_name)
+
+        # Expand nodes_to_exclude: entries ending with "/" are prefix patterns
+        # resolved against actual node names in preproc_onnx (Wave 11 Task 5).
+        # Use case: `/model.23/` excludes the entire Detect head (NMS index
+        # tensors are destroyed by INT8 wrapping — GatherElements/TopK/Mod).
+        raw_excludes = list(recipe.technique.nodes_to_exclude or [])
+        expanded_excludes: list[str] = []
+        if raw_excludes:
+            import onnx as _onnx
+            _model = _onnx.load(str(preproc_onnx))
+            _all_names = [n.name for n in _model.graph.node]
+            for pat in raw_excludes:
+                if pat.endswith("/"):
+                    expanded_excludes.extend(n for n in _all_names if n.startswith(pat))
+                else:
+                    expanded_excludes.append(pat)
+            del _model
+            print(
+                f"[info] ort_cpu_int8_static: nodes_to_exclude patterns={raw_excludes} "
+                f"-> {len(expanded_excludes)} node names",
+                file=sys.stderr,
+            )
+
+        quantize_static(
+            model_input=str(preproc_onnx),
+            model_output=str(int8_onnx),
+            calibration_data_reader=reader,
+            quant_format=QuantFormat.QDQ,
+            activation_type=QuantType.QInt8,
+            weight_type=QuantType.QInt8,
+            per_channel=True,
+            reduce_range=False,
+            calibrate_method=method_map[calibrator],
+            nodes_to_exclude=expanded_excludes or None,
+            extra_options={
+                "ActivationSymmetric": True,
+                "WeightSymmetric": True,
+                "AddQDQPairToWeight": True,
+                # NOTE: Task 4 Step 3b is the empirical comparison for this
+                # flag. Current default False per CPU MLAS fusion guidance;
+                # flip to True if smoke shows latency regression.
+                "DedicatedQDQPair": False,
+            },
+        )
+
+    so = session_options_factory(recipe)
+
+    def _load():
+        return ort.InferenceSession(str(int8_onnx), sess_options=so,
+                                    providers=["CPUExecutionProvider"])
+
+    session, cold_ms = measure_cold_start(_load)
+    input_name = session.get_inputs()[0].name
+    output_names = [o.name for o in session.get_outputs()]
+    return session, input_name, output_names, cold_ms, int8_onnx
+
+
+# ---------------------------------------------------------------------------
+# OpenVINO paths (Task 5)
+# ---------------------------------------------------------------------------
+
+_OV_CORE: Any = None  # openvino.Core singleton, lazy-initialized
+
+
+def _get_ov_core():
+    """Return a cached ``openvino.Core`` — creating one costs ~300ms and
+    reinitializing per recipe dominates cold_start_ms in batch runs."""
+    global _OV_CORE
+    if _OV_CORE is None:
+        import openvino as ov
+        _OV_CORE = ov.Core()
+    return _OV_CORE
+
+
+class OVRunnerAsORT:
+    """Minimal adapter that makes an ``openvino.CompiledModel`` quack like
+    ``onnxruntime.InferenceSession`` — just enough surface for
+    ``measure_latency``'s forward closure and ``run_cpu.run()``'s
+    output-name collection:
+
+      - ``.run(output_names, {input_name: ndarray}) -> list[ndarray]``
+      - ``.get_inputs()[i].name``
+      - ``.get_outputs()[i].name``
+
+    Does NOT implement full ORT surface (no ``io_binding``, no
+    ``get_providers``, etc.) — only the calls the CPU runner and the
+    shared measurement utilities actually make.
+    """
+
+    class _NamedPort:
+        def __init__(self, name: str):
+            self.name = name
+
+    def __init__(self, compiled, input_name: str, output_names: list[str]):
+        self._compiled = compiled
+        self._input_name = input_name
+        self._output_names = list(output_names)
+
+    def run(self, output_names, input_dict):
+        x = input_dict[self._input_name]
+        result = self._compiled([x])
+        # OV returns {Output: ndarray}; index by positional output port so
+        # order matches self._output_names (what run_cpu captured at session
+        # creation). Requested output_names is honored only by position —
+        # OV IR and ONNX may rename outputs but positional alignment holds.
+        return [result[self._compiled.output(i)]
+                for i in range(len(self._output_names))]
+
+    def get_inputs(self):
+        return [OVRunnerAsORT._NamedPort(self._input_name)]
+
+    def get_outputs(self):
+        return [OVRunnerAsORT._NamedPort(n) for n in self._output_names]
+
+
+def _openvino_perf_hint(bs: int) -> str:
+    """OpenVINO PERFORMANCE_HINT by batch size. bs=1 → LATENCY pins a single
+    inference stream; bs>1 → THROUGHPUT opens multiple streams to saturate
+    the CPU. This is the "fair" comparison call-out in the Wave 6 plan."""
+    return "LATENCY" if bs == 1 else "THROUGHPUT"
+
+
+def _compile_openvino(ov_model, recipe: Recipe, bs: int):
+    """Shared compile_model invocation with hint + thread count applied."""
+    core = _get_ov_core()
+    config = {
+        "PERFORMANCE_HINT": _openvino_perf_hint(bs),
+    }
+    nthreads = _resolve_thread_count(recipe)
+    # INFERENCE_NUM_THREADS accepts a string per OV 2024.x docs.
+    config["INFERENCE_NUM_THREADS"] = str(nthreads)
+    return core.compile_model(ov_model, "CPU", config)
+
+
+def _prepare_openvino_fp32(recipe: Recipe):
+    """Read FP32 ONNX into an OpenVINO model, save the IR (so re-runs reuse
+    it), compile for CPU with the batch-size-appropriate performance hint,
+    and wrap as an ORT-compatible runner.
+
+    Returns (runner, input_name, output_names, cold_ms, onnx_path) — same
+    tuple shape as the ORT paths so run() doesn't branch on backend.
+    """
+    import openvino as ov
+
+    weights = _resolve_weights(recipe)
+    imgsz = recipe.measurement.input_size
+    onnx_cache = Path("results_cpu/_onnx")
+    ir_cache = Path("results_cpu/_ov_ir")
+    ir_cache.mkdir(parents=True, exist_ok=True)
+
+    onnx_path = _export_onnx(weights, imgsz, half=False, cache_dir=onnx_cache,
+                             dynamic=True)
+    ir_xml = ir_cache / f"{recipe.name}_fp32.xml"
+
+    def _load():
+        core = _get_ov_core()
+        if ir_xml.exists():
+            ov_model = core.read_model(str(ir_xml))
+        else:
+            ov_model = core.read_model(str(onnx_path))
+            ov.save_model(ov_model, str(ir_xml))
+        # Pick the first batch size the recipe mentions to compile; the
+        # outer run loop re-enters with other batch sizes as needed. Most
+        # recipes list [1, 8] and we want the bs=1 LATENCY-hint path
+        # represented in cold_start_ms.
+        first_bs = recipe.measurement.batch_sizes[0]
+        compiled = _compile_openvino(ov_model, recipe, first_bs)
+        return ov_model, compiled
+
+    (ov_model, compiled), cold_ms = measure_cold_start(_load)
+
+    input_name = ov_model.inputs[0].get_any_name()
+    output_names = [o.get_any_name() for o in ov_model.outputs]
+    runner = OVRunnerAsORT(compiled, input_name, output_names)
+    return runner, input_name, output_names, cold_ms, onnx_path
+
+
+def _prepare_openvino_int8_nncf(recipe: Recipe):
+    """NNCF post-training quantization on OpenVINO FP32 IR, then compile the
+    quantized IR for CPU. Spike (#R1 CLEARED 2026-04-21) showed the default
+    MIXED preset handles YOLO26n attention blocks without an ignored_scope
+    override — so none is added here. If a future model regresses, the
+    escape hatch is recipe.technique.nodes_to_exclude (already schema'd).
+
+    Accuracy eval on INT8 OV IR requires ultralytics val adapter work that
+    is out of Wave 6 scope — returned onnx_path is the FP32 baseline, and
+    run() records a notes marker when it detects the mismatch (Task 10
+    follow-up).
+    """
+    import nncf
+    import openvino as ov
+
+    weights = _resolve_weights(recipe)
+    imgsz = recipe.measurement.input_size
+    onnx_cache = Path("results_cpu/_onnx")
+    ir_cache = Path("results_cpu/_ov_ir")
+    ir_cache.mkdir(parents=True, exist_ok=True)
+
+    onnx_path = _export_onnx(weights, imgsz, half=False, cache_dir=onnx_cache,
+                             dynamic=True)
+    int8_xml = ir_cache / f"{recipe.name}_int8.xml"
+
+    def _load():
+        core = _get_ov_core()
+        if int8_xml.exists():
+            ov_int8 = core.read_model(str(int8_xml))
+        else:
+            ov_fp32 = core.read_model(str(onnx_path))
+            # Streaming calibration generator — NNCF accepts any iterable
+            # of transform_func(sample) outputs; we already produce
+            # (1, 3, H, W) np.float32 arrays so transform is identity.
+            val_yaml = (
+                os.environ.get("OMNI_CALIB_YAML")
+                or os.environ.get("OMNI_COCO_YAML")
+                or recipe.technique.calibration_dataset
+            )
+            n_samples = recipe.technique.calibration_samples or 300
+            seed = (recipe.technique.calibration_seed
+                    or recipe.measurement.seed or 42)
+
+            def _sample_gen():
+                yield from _iter_calib_samples(val_yaml, n_samples, imgsz, seed)
+
+            calib = nncf.Dataset(_sample_gen(), transform_func=lambda x: x)
+            ov_int8 = nncf.quantize(
+                ov_fp32,
+                calib,
+                preset=nncf.QuantizationPreset.MIXED,
+                target_device=nncf.TargetDevice.CPU,
+                subset_size=n_samples,
+            )
+            ov.save_model(ov_int8, str(int8_xml))
+        first_bs = recipe.measurement.batch_sizes[0]
+        compiled = _compile_openvino(ov_int8, recipe, first_bs)
+        return ov_int8, compiled
+
+    (ov_int8, compiled), cold_ms = measure_cold_start(_load)
+
+    input_name = ov_int8.inputs[0].get_any_name()
+    output_names = [o.get_any_name() for o in ov_int8.outputs]
+    runner = OVRunnerAsORT(compiled, input_name, output_names)
+    return runner, input_name, output_names, cold_ms, onnx_path
+
+
 def _prepare_cpu_session(recipe: Recipe):
     """Dispatcher on (source, dtype). Returns session object; structure
     depends on backend."""
@@ -169,24 +628,45 @@ def _prepare_cpu_session(recipe: Recipe):
         return _prepare_ort_cpu_fp32(recipe, _build_ort_session_options)
 
     if source == "ort_cpu" and dtype == "int8":
-        raise NotImplementedError(
-            "ort_cpu + int8: implemented by Task 4 "
-            "(static VNNI / dynamic quantize_dynamic)"
-        )
+        # calibrator=None → dynamic (runtime activation scales).
+        # calibrator in {minmax,entropy,percentile} → static QDQ.
+        if recipe.technique.calibrator is None:
+            return _prepare_ort_cpu_int8_dynamic(recipe, _build_ort_session_options)
+        return _prepare_ort_cpu_int8_static(recipe, _build_ort_session_options)
     if source == "ort_cpu" and dtype == "bf16":
+        # Task 4 Step 6 hardware gate. BF16 matmul on CPU requires either
+        # AMX tile ops (Sapphire Rapids+) or AVX-512 BF16 (Cooper Lake+ /
+        # Tiger Lake+). Emit distinct NotImplementedError messages so run()
+        # can record the right note in Result.notes — "hardware lacks
+        # support" is not the same failure as "backend work remaining".
+        cpu_info = _collect_cpu_info()
+        flags = set(cpu_info.get("cpu_flags") or [])
+        has_bf16_isa = bool(flags & {"amx_tile", "avx512_bf16"})
+        if not has_bf16_isa:
+            raise NotImplementedError(
+                "ort_cpu + bf16: host CPU lacks BF16 ISA "
+                "(need amx_tile or avx512_bf16; saw flags="
+                f"{sorted(flags) if flags else 'unknown'}). "
+                "Recipe skipped; Result.meets_constraints=False."
+            )
         raise NotImplementedError(
-            "ort_cpu + bf16: implemented by Task 4 Step 6 "
-            "(requires AMX or AVX-512 BF16 hardware)"
+            "ort_cpu + bf16: hardware gate passed but BF16 inference on "
+            "ORT CPU EP is not yet implemented (explicit float→bfloat16 "
+            "model conversion required; tracked in Wave 7 roadmap)."
         )
     if source == "openvino":
+        if dtype == "fp32":
+            return _prepare_openvino_fp32(recipe)
+        if dtype == "int8":
+            return _prepare_openvino_int8_nncf(recipe)
         raise NotImplementedError(
-            "openvino source: implemented by Task 5 "
-            "(OpenVINO runtime + NNCF INT8 PTQ)"
+            f"openvino + dtype={dtype!r}: only fp32 and int8 are supported "
+            "in Wave 6 (bf16 / fp16 defer to Wave 7)."
         )
 
     raise RuntimeError(
         f"run_cpu does not support source={source!r} dtype={dtype!r}. "
-        f"GPU recipes (trt_builtin/modelopt/ort_quant/brevitas) must use run_trt.py."
+        f"GPU recipes (trt_builtin/modelopt/ort_quant) must use run_trt.py."
     )
 
 
@@ -199,14 +679,6 @@ def run(recipe_path: str, out_path: str) -> int:
     _seed_all(recipe.measurement.seed)
 
     env = collect_env()
-    # Wave 6: capture CPU-specific env fields as best-effort. env_lock.py's
-    # full CPU detection arrives in Task 2; for now populate minimally.
-    try:
-        import platform
-
-        env.setdefault("cpu_model", platform.processor() or None)
-    except Exception:
-        pass
 
     imgsz = recipe.measurement.input_size
     started = datetime.now(timezone.utc).isoformat()
@@ -242,6 +714,7 @@ def run(recipe_path: str, out_path: str) -> int:
                     _forward,
                     warmup_iters=max(recipe.measurement.warmup_iters, 200),
                     measure_iters=max(recipe.measurement.measure_iters, 300),
+                    iter_cooldown_ms=recipe.measurement.iter_cooldown_ms,
                 )
                 per_bs[bs] = stats
             except Exception as e:
@@ -311,7 +784,7 @@ def run(recipe_path: str, out_path: str) -> int:
         finished_at=finished,
         env=EnvInfo(**{k: v for k, v in env.items() if k in EnvInfo.model_fields}),
         model_size_mb=None,
-        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99"}}),
+        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99", "stddev_ms"}}),
         throughput_fps=throughput,
         peak_gpu_mem_mb=None,  # CPU runner: no GPU memory to report
         cold_start_ms=cold_start_ms,

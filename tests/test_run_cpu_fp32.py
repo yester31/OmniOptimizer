@@ -74,31 +74,65 @@ def test_dispatch_ort_cpu_fp32_creates_ort_session(tmp_path, monkeypatch):
     assert session == "stub_session"
 
 
-def test_dispatch_ort_cpu_int8_raises_not_implemented():
-    """INT8 path is Task 4 territory. Until implemented, dispatcher must
-    raise NotImplementedError rather than silently fall through."""
+def test_dispatch_openvino_fp32_routes_to_openvino_handler(monkeypatch):
+    """source=openvino + dtype=fp32 → _prepare_openvino_fp32 (Task 5 live).
+    Full dispatcher test lives in test_run_cpu_openvino.py; this is the
+    fp32-sibling guard so the three CPU-source tests in this file stay
+    symmetric (ort_cpu fp32 / openvino fp32 / unknown source)."""
     from scripts import run_cpu
 
-    recipe = _make_recipe(source="ort_cpu", dtype="int8")
-    with pytest.raises(NotImplementedError, match="Task 4"):
-        run_cpu._prepare_cpu_session(recipe)
+    called = {"branch": None}
 
+    def fake_ov(recipe_):
+        called["branch"] = "openvino_fp32"
+        return "stub"
 
-def test_dispatch_openvino_raises_not_implemented():
-    """OpenVINO path is Task 5 territory."""
-    from scripts import run_cpu
-
+    monkeypatch.setattr(run_cpu, "_prepare_openvino_fp32", fake_ov)
     recipe = _make_recipe(source="openvino", dtype="fp32", engine="openvino")
-    with pytest.raises(NotImplementedError, match="Task 5"):
+    run_cpu._prepare_cpu_session(recipe)
+    assert called["branch"] == "openvino_fp32"
+
+
+def test_dispatch_bf16_skips_when_cpu_lacks_bf16_and_amx(monkeypatch):
+    """BF16 requires AMX (SPR+) or AVX-512 BF16 (Cooper Lake+). Without
+    either, dispatcher must raise NotImplementedError with a message
+    that run_cpu.run() will surface as 'meets_constraints=False' + a
+    hardware-gate note — not a silent fall-through."""
+    from scripts import run_cpu
+
+    monkeypatch.setattr(run_cpu, "_collect_cpu_info",
+                        lambda: {"cpu_flags": ["avx2", "avx512f"]})
+    recipe = _make_recipe(source="ort_cpu", dtype="bf16")
+    with pytest.raises(NotImplementedError, match="lacks BF16"):
         run_cpu._prepare_cpu_session(recipe)
 
 
-def test_dispatch_bf16_raises_not_implemented():
-    """BF16 path (Task 4 Step 6) gated on AMX/AVX-512 BF16 hardware."""
+def test_dispatch_bf16_raises_unimpl_when_hardware_capable(monkeypatch):
+    """When the host CPU reports AMX or AVX-512 BF16, the hardware gate
+    passes but BF16 inference on ORT CPU EP still isn't wired up (the
+    actual float→bfloat16 model conversion is deferred). The dispatcher
+    must raise a distinct NotImplementedError so it's clear the gate
+    isn't the blocker — the backend work is."""
     from scripts import run_cpu
 
+    monkeypatch.setattr(run_cpu, "_collect_cpu_info",
+                        lambda: {"cpu_flags": ["avx2", "avx512f", "amx_tile"]})
     recipe = _make_recipe(source="ort_cpu", dtype="bf16")
-    with pytest.raises(NotImplementedError, match="Task 4"):
+    with pytest.raises(NotImplementedError, match="not yet implemented"):
+        run_cpu._prepare_cpu_session(recipe)
+
+
+def test_dispatch_bf16_cpu_flags_none_treated_as_no_support(monkeypatch):
+    """cpu_flags=None (detection failed or unavailable) is treated as
+    'unknown capability → assume missing', so the recipe still records
+    'BF16 skipped' rather than silently trying to build an unsupported
+    session."""
+    from scripts import run_cpu
+
+    monkeypatch.setattr(run_cpu, "_collect_cpu_info",
+                        lambda: {"cpu_flags": None})
+    recipe = _make_recipe(source="ort_cpu", dtype="bf16")
+    with pytest.raises(NotImplementedError, match="lacks BF16"):
         run_cpu._prepare_cpu_session(recipe)
 
 
@@ -106,8 +140,8 @@ def test_dispatch_unknown_source_raises():
     """Non-CPU sources routed to run_cpu should fail loudly, not run silently."""
     from scripts import run_cpu
 
-    # brevitas is a GPU-only source — run_cpu should not accept it.
-    recipe = _make_recipe(source="brevitas", dtype="int8", engine="tensorrt")
+    # modelopt is a GPU-only source — run_cpu should not accept it.
+    recipe = _make_recipe(source="modelopt", dtype="int8", engine="tensorrt")
     with pytest.raises((NotImplementedError, ValueError, RuntimeError)):
         run_cpu._prepare_cpu_session(recipe)
 

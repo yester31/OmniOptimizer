@@ -1,0 +1,35 @@
+name: openvino_int8_nncf
+model:
+  family: yolo26
+  variant: n
+  weights: yolo26n.pt
+  ultralytics_version: null
+runtime:
+  engine: openvino
+  dtype: int8
+technique:
+  name: int8_nncf
+  source: openvino
+  calibrator: nncf
+  # NNCF default is 300 samples; spike (R1 CLEARED) confirmed the MIXED
+  # preset handles YOLO26n attention blocks without ignored_scope overrides
+  # at this sample count.
+  calibration_samples: 300
+  calibration_dataset: coco_val2017
+  calibration_seed: 42
+hardware:
+  gpu: null
+  cpu_cores_physical: null
+measurement:
+  dataset: coco_val2017
+  num_images: 500
+  warmup_iters: 200
+  measure_iters: 300
+  batch_sizes: [1, 8]
+  input_size: 640
+  thread_count: null
+  seed: 42
+constraints:
+  max_map_drop_pct: 1.0
+  # INT8 targets VNNI speedup — 10 fps enforceable on VNNI hosts.
+  min_fps_bs1: 10

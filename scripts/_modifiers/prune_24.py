@@ -93,7 +93,7 @@ def _is_eligible_module(m: nn.Module) -> bool:
     return False
 
 
-def _attach_mask_hook(module: nn.Module) -> None:
+def _attach_mask_hook(module: nn.Conv2d | nn.Linear) -> None:
     """Register a 2:4 mask on *module* using a forward pre-hook.
 
     The mask is stored as a plain attribute (not a buffer, to avoid
@@ -101,10 +101,11 @@ def _attach_mask_hook(module: nn.Module) -> None:
     in-place before each forward call.  This keeps the state_dict keys
     unchanged so ultralytics EMA and checkpoint loading remain compatible.
     """
-    mask = _compute_2_4_mask(module.weight)
+    weight = module.weight
+    mask = _compute_2_4_mask(weight)
     # Apply once immediately so the very first forward sees sparse weights.
     with torch.no_grad():
-        module.weight.data.mul_(mask)
+        weight.data.mul_(mask)
     # Store mask as a plain tensor attribute (non-parameter, non-buffer).
     setattr(module, _MASK_ATTR, mask)
 

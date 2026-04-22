@@ -97,6 +97,20 @@ def run(recipe_path: str, out_path: str) -> int:
     imgsz = recipe.measurement.input_size
     compile_note: str | None = None
     if recipe.runtime.mode == "compile":
+        # Wave 11 Task 2 (2026-04-22): torch 2.8 _inductor/codecache.py:205 imports
+        # `triton.compiler.compiler.triton_key`, which only existed in triton 2.x.
+        # triton 3.x (incl. triton-windows 3.x) removed it. torch catches
+        # ModuleNotFoundError but not ImportError, so torch.compile raises. Inject
+        # a shim so the import succeeds; the key value itself is opaque to torch.
+        try:
+            import triton.compiler.compiler as _tcc  # type: ignore[import-not-found]
+            import hashlib as _hashlib
+            import triton as _triton  # type: ignore[import-not-found]
+            if not hasattr(_tcc, "triton_key"):
+                _tcc.triton_key = lambda: _hashlib.md5(_triton.__version__.encode()).hexdigest()
+        except Exception:
+            pass  # triton missing entirely -> torch.compile itself will raise below
+
         try:
             compiled = torch.compile(inner_model, mode="reduce-overhead")
             probe = torch.randn(1, 3, imgsz, imgsz, device=device, dtype=torch_dtype)
@@ -167,7 +181,7 @@ def run(recipe_path: str, out_path: str) -> int:
         finished_at=finished,
         env=env,  # type: ignore[arg-type]
         model_size_mb=model_size_mb,
-        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99"}}),
+        latency_ms=LatencyStats(**{k: v for k, v in lat.items() if k in {"p50", "p95", "p99", "stddev_ms"}}),
         throughput_fps=throughput,
         peak_gpu_mem_mb=peak_mem,
         cold_start_ms=cold_start_ms,
