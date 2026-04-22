@@ -9,10 +9,14 @@ code in this repository. Keep it short; detail lives in `docs/`.
 model + target GPU + constraints (max mAP drop, min fps); it runs a bank of
 (runtime × technique) recipes end-to-end and recommends the winner.
 
-Current scope: YOLO26n, one NVIDIA GPU + x86_64 Intel CPU, 28 active recipes
+Current scope: YOLO26n, one NVIDIA GPU + x86_64 Intel CPU, 31 active recipes
 across GPU (`trt_builtin`, `modelopt`, `ort_quant`, `modelopt_fastnas`) and
 CPU (`ort_cpu`, `openvino`, `openvino_fastnas`) backends plus FP32 / TF32 /
 FP16 / BF16 / INT8 variants.
+Wave 14 (TRT tuning) SHIPPED 2026-04-22 — #40 `trt_fp16_opt5` (fps 645.2,
++48% over #05 FP16 via `builder_optimization_level=5`) + #41 `trt_bf16` +
+#42 `modelopt_int8_asymmetric` (**NEW TOP at fps 770.5**, dethrones
+entropy 763.9 via `use_zero_point=True`).
 Intel Neural Compressor was evaluated (Wave 3) and removed — see the audit
 below. Brevitas recipes (#20-#22) archived 2026-04-22 (redundant with
 `modelopt_int8_entropy`; Q/DQ asymmetry ruled out as cause of fps deficit).

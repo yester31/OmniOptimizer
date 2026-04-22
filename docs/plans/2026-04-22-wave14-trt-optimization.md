@@ -1,8 +1,13 @@
 # Wave 14: TRT Builder Optimization + BF16 + Asymmetric INT8
 
+**Status**: **SHIPPED 2026-04-22**. 3 축 전부 성공:
+- A1 (opt_level=5): fps **645.2** (vs #05 baseline 435 = **+48%**, 목표 +5% 훨씬 초과)
+- A2 (bf16): fps 372.7, mAP **0%p drop** vs FP16 (완료 기준 ≤0.05%p PASS)
+- A5 (asymmetric): fps **770.5** (**NEW TOP**, +0.9% vs entropy 763.9), mAP 0%p drop
+
 **Goal:** 현재 Top recipe (`modelopt_int8_entropy` fps 763.9) 대비 **+5-15% fps 향상** + mAP 유지. 3 신규 recipe 로 TRT builder tuning (opt_level=5) + BF16 (Ampere sm_80+) + asymmetric INT8 실험.
 
-**Precondition**: Wave 11 (recipe debug cleanup) 완료 후 착수. **Wave 11 B4 결과가 본 Wave Task 1 가설 검증 입력** (outside voice F2 반영) — B4 가 "calibrator → tactic 분기가 원인" 으로 결론나면 opt_level=5 로 ptq/entropy 수렴 여부 확인이 Task 1 성공 기준에 포함. B4 가 "calibrator 무관" 결론이면 Task 1 은 independent delta 측정으로 수행.
+**Precondition**: Wave 11 (recipe debug cleanup) 완료 후 착수. **Wave 11 B4 결과가 본 Wave Task 1 가설 검증 입력** (outside voice F2 반영) — B4 가 "calibrator → tactic 분기가 원인" 으로 결론나면 opt_level=5 로 ptq/entropy 수렴 여부 확인이 Task 1 성공 기준에 포함. B4 가 "calibrator 무관" 결론이면 Task 1 은 independent delta 측정으로 수행. **결과 2026-04-22**: B4 결론이 "TRT nondeterminism" 이었고, opt_level=5 (#40) 가 실제로 fps 435→645 로 **대폭 안정화**. Wave 11 B4 가설 (opt_level 이 ceiling lift + stabilization) 이 입증됨.
 
 **Background**: 2026-04-22 recipe bank audit 에서 high-ROI 3 candidate (A1 + A2 + A5). 전부 보유 HW (RTX 3060 Laptop sm_86) 에서 실측 가능.
 
