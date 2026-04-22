@@ -51,11 +51,14 @@
 
 ## Task 3: B3 — ort_trt_fp16 fps 211 개선
 
-**가설**: TRT execution provider cache 미활성 + ORT graph_optimization_level default.
+**⚠ Precondition (Task 0 finding 2026-04-22)**: 현재 환경의 `TensorrtExecutionProvider` 는 `nvinfer_10.dll` PATH 누락으로 silent CPU fallback 중. Task 3 진입 전 DLL path 수복 필수 — 상세 `docs/improvements/2026-04-22-wave11-task0-findings.md`. 수복 없이 3.4 측정 결과는 CPU EP 수치라 신뢰 불가.
 
-- [ ] 3.1 recipe #04 에 `trt_engine_cache_enable=True`, `trt_engine_cache_path=results/_trt_cache/` 추가 (ORT TRT provider options)
+**가설**: TRT execution provider cache 미활성 + ORT graph_optimization_level default. (환경 수복 후에만 유효)
+
+- [ ] 3.0 **선행**: `os.add_dll_directory(<TRT_ROOT>\lib)` 를 `scripts/run_ort.py` 또는 system PATH 에 삽입 후 `sess.get_providers()[0] == "TensorrtExecutionProvider"` 확인
+- [ ] 3.1 recipe #04 에 `trt_engine_cache_enable=True`, `trt_engine_cache_path=results/_trt_cache/` 추가 (ORT TRT provider options — 키명 Task 0.4 검증 완료)
 - [ ] 3.2 `SessionOptions.graph_optimization_level = ORT_ENABLE_ALL` 명시
-- [ ] 3.3 TRT FP16 필터링 옵션 `trt_fp16_enable=True` 확인
+- [ ] 3.3 `trt_fp16_enable=True` 확인 (키명 Task 0.4 검증 완료)
 - [ ] 3.4 재측정 — fps 300+ 타겟 (native TRT fp16 fps 435 의 70%)
 
 ## Task 4: B4 — modelopt INT8 ptq vs entropy fps 격차 원인 조사
