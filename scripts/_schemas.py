@@ -113,6 +113,12 @@ class MeasurementSpec(BaseModel):
     # in to absorb thermal throttle; GPU recipes leave this None to keep
     # the hot path uncontaminated by sleep(). Negative values rejected.
     iter_cooldown_ms: Optional[float] = Field(default=None, ge=0)
+    # Wave 15 D3: TRT engine build wall-clock ceiling (seconds). Breach
+    # logs a structured warning in Result.notes instead of crashing the
+    # recipe run. None → use legacy 600s default; FP16 recipes stay within
+    # that comfortably, but INT8 at builder_optimization_level=5 can take
+    # 10+ minutes per engine so opt-in recipes should set 900-1200s.
+    build_ceiling_s: Optional[int] = Field(default=None, gt=0)
 
 
 class ConstraintSpec(BaseModel):
