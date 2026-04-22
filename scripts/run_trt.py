@@ -143,12 +143,17 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         ) from e
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    calibrator = recipe.technique.calibrator or "max"  # max | entropy | percentile
+    calibrator = recipe.technique.calibrator or "max"  # max | entropy | percentile | *_asymmetric
+    # Wave 14 A5: trailing "_asymmetric" suffix toggles use_zero_point=True
+    # in modelopt.onnx.quantize (base method unchanged).
+    use_zero_point = calibrator.endswith("_asymmetric")
+    base_calibrator = calibrator[: -len("_asymmetric")] if use_zero_point else calibrator
     sparsity_tag = "_sparse24" if recipe.technique.sparsity_preprocess == "2:4" else ""
+    asym_tag = "_asym" if use_zero_point else ""
     bs_tag = "dyn" if dynamic else "bs1"
     tag = (
         f"{Path(recipe.model.weights).stem}_{imgsz}_modelopt_"
-        f"{calibrator}{sparsity_tag}_{bs_tag}.onnx"
+        f"{base_calibrator}{asym_tag}{sparsity_tag}_{bs_tag}.onnx"
     )
     cached = cache_dir / tag
     if cached.exists():
@@ -177,16 +182,18 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
     quant_kwargs = dict(
         onnx_path=str(clean_onnx),
         quantize_mode="int8",
-        calibration_method=calibrator,
+        calibration_method=base_calibrator,
         calibration_data=calib_data,
         output_path=str(cached),
         log_level="WARNING",
+        use_zero_point=use_zero_point,
     )
     if recipe.technique.nodes_to_exclude:
         quant_kwargs["nodes_to_exclude"] = list(recipe.technique.nodes_to_exclude)
 
     print(
-        f"[info] modelopt.onnx.quantize: method={calibrator}, "
+        f"[info] modelopt.onnx.quantize: method={base_calibrator}, "
+        f"asymmetric={use_zero_point}, "
         f"samples={calib_data.shape[0]}, "
         f"sparsity={sparsity_tag or 'none'}, "
         f"excludes={len(recipe.technique.nodes_to_exclude or [])}, "
@@ -527,8 +534,9 @@ def _build_engine(
     calib_seed: int,
     quant_preapplied: bool = False,
     enable_tf32: bool = False,
-) -> tuple[Optional[Path], Optional[str]]:
-    """Build a TensorRT engine. Returns (engine_path, note-or-None).
+    builder_optimization_level: Optional[int] = None,
+) -> tuple[Optional[Path], Optional[str], Optional[float]]:
+    """Build a TensorRT engine. Returns (engine_path, note-or-None, build_time_s).
 
     Shares a layer-timing cache across recipes — first build warms it,
     subsequent builds reuse layer-tactic timings so only truly new layers
@@ -536,16 +544,25 @@ def _build_engine(
     keyed on device / CUDA / TRT version / builder flags, so reusing it
     across recipes with different dtype or flags is safe (TRT rejects
     mismatched entries rather than silently using wrong timings).
+
+    Wave 14 A1: ``builder_optimization_level`` maps directly to
+    ``nvinfer.BuilderConfig.builder_optimization_level`` (range 0-5,
+    default=3). Level 5 runs exhaustive autotune; build time grows 3-5x
+    but tactic selection stabilizes and runtime fps typically climbs
+    +5-15%. Hard 600s build-time ceiling (outside voice F7) — exceeded →
+    return failure note instead of hanging the recipe bank run.
     """
+    import time as _time
+    t0 = _time.perf_counter()
     try:
         import tensorrt as trt  # noqa: F401
     except Exception as e:
-        return None, f"tensorrt import failed: {e}"
+        return None, f"tensorrt import failed: {e}", None
 
     import tensorrt as trt
 
     if engine_path.exists():
-        return engine_path, None
+        return engine_path, None, None
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -577,9 +594,20 @@ def _build_engine(
         print("[info] FP32 with TF32 tensor cores enabled", file=sys.stderr)
     elif dtype == "fp16":
         config.set_flag(trt.BuilderFlag.FP16)
+    elif dtype == "bf16":
+        # Wave 14 A2: BF16 on Ampere sm_80+ (RTX 3060 Laptop = sm_86 OK).
+        # BuilderFlag.BF16 present from TRT 9.0+. BF16 shares FP32 exponent range
+        # so overflow-sensitive weights fare better than FP16 at similar throughput.
+        if sparsity == "2:4":
+            return None, (
+                "BF16 + SPARSE_WEIGHTS is untested on sm_86 and the matrix is not "
+                "guaranteed in TRT 10.x docs — Wave 14 Task 2.6 guard."
+            ), None
+        config.set_flag(trt.BuilderFlag.BF16)
+        print("[info] BF16 builder flag set", file=sys.stderr)
     elif dtype == "int8":
         if not builder.platform_has_fast_int8:
-            return None, "platform does not support fast INT8"
+            return None, "platform does not support fast INT8", None
         config.set_flag(trt.BuilderFlag.INT8)
         if quant_preapplied:
             # QDQ nodes carry the scales; no calibrator needed. INT8 flag is
@@ -616,7 +644,7 @@ def _build_engine(
                         "real ultralytics dataset yaml, or pass OMNI_ALLOW_RANDOM_CALIB=1 "
                         "to explicitly opt in to the random-normal fallback "
                         "(known to drop mAP by double digits)."
-                    )
+                    ), None
                 calibrator = _make_random_calibrator(
                     shape=calib_shape,
                     n_samples=calib_samples,
@@ -631,7 +659,16 @@ def _build_engine(
         try:
             config.set_flag(trt.BuilderFlag.SPARSE_WEIGHTS)
         except AttributeError:
-            return None, "TensorRT build lacks SPARSE_WEIGHTS flag"
+            return None, "TensorRT build lacks SPARSE_WEIGHTS flag", None
+
+    # Wave 14 A1: builder_optimization_level (TRT 10.x, 0-5, default=3).
+    if builder_optimization_level is not None:
+        config.builder_optimization_level = int(builder_optimization_level)
+        print(
+            f"[info] builder_optimization_level={builder_optimization_level} "
+            f"(TRT default=3; higher = longer build, better tactic search)",
+            file=sys.stderr,
+        )
 
     # Fixed shape profile so latency is deterministic.
     profile = builder.create_optimization_profile()
@@ -641,8 +678,19 @@ def _build_engine(
     config.add_optimization_profile(profile)
 
     serialized = builder.build_serialized_network(network, config)
+    build_time_s = _time.perf_counter() - t0
     if serialized is None:
-        return None, "engine build returned None"
+        return None, "engine build returned None", build_time_s
+
+    # Wave 14 outside voice F7: 600s ceiling guard. opt_level=5 on bigger
+    # models has shipped over 10 minutes in practice; warn so the operator
+    # can decide whether to lower the level for subsequent recipes.
+    if build_time_s > 600.0:
+        print(
+            f"[warn] build_time_s={build_time_s:.0f}s exceeds 600s ceiling — "
+            f"consider lowering builder_optimization_level for this recipe",
+            file=sys.stderr,
+        )
 
     # Persist the timing cache so the next engine build benefits. TRT
     # updates the cache in place during tactic profiling; we just
@@ -656,7 +704,7 @@ def _build_engine(
 
     engine_path.parent.mkdir(parents=True, exist_ok=True)
     engine_path.write_bytes(bytes(serialized))
-    return engine_path, None
+    return engine_path, None, build_time_s
 
 
 def _make_trt_forward(engine_path: Path, batch_size: int, imgsz: int):  # pragma: no cover
@@ -803,16 +851,22 @@ def run(recipe_path: str, out_path: str) -> int:
     per_bs: dict[int, dict] = {}
     cold_start_ms: Optional[float] = None
     bs1_engine: Optional[Path] = None  # referenced later for mAP eval
+    build_time_s_bs1: Optional[float] = None  # Wave 14 A1: bs1 build time
 
     source = recipe.technique.source
     source_suffix = _SOURCE_TAG.get(source, f"_{source}")
     tf32_suffix = "_tf32" if enable_tf32 else ""
+    opt_suffix = (
+        f"_opt{recipe.runtime.builder_optimization_level}"
+        if recipe.runtime.builder_optimization_level is not None
+        else ""
+    )
     for bs in recipe.measurement.batch_sizes:
         onnx_path, quant_preapplied = _prepare_onnx(recipe, imgsz, onnx_cache, bs)
-        engine_tag = f"{onnx_path.stem}_{dtype}{tf32_suffix}{'_sparse' if sparsity else ''}{source_suffix}_bs{bs}_{version_tag}.engine"
+        engine_tag = f"{onnx_path.stem}_{dtype}{tf32_suffix}{opt_suffix}{'_sparse' if sparsity else ''}{source_suffix}_bs{bs}_{version_tag}.engine"
         engine_path = engine_cache / engine_tag
 
-        built, err = _build_engine(
+        built, err, build_time_s = _build_engine(
             onnx_path=onnx_path,
             engine_path=engine_path,
             dtype=dtype,
@@ -823,12 +877,14 @@ def run(recipe_path: str, out_path: str) -> int:
             calib_seed=recipe.technique.calibration_seed or recipe.measurement.seed,
             quant_preapplied=quant_preapplied,
             enable_tf32=enable_tf32,
+            builder_optimization_level=recipe.runtime.builder_optimization_level,
         )
         if built is None:
             note_parts.append(f"bs={bs}: build failed ({err})")
             continue
         if bs == 1:
             bs1_engine = built
+            build_time_s_bs1 = build_time_s
 
         try:
             def _load(e=built, b=bs):
@@ -927,6 +983,7 @@ def run(recipe_path: str, out_path: str) -> int:
         peak_gpu_mem_mb=peak_mem,
         cold_start_ms=cold_start_ms,
         accuracy=acc,
+        build_time_s=build_time_s_bs1,
         meets_constraints=meets,
         notes="; ".join(note_parts) or None,
     )

@@ -18,8 +18,13 @@ class RuntimeSpec(BaseModel):
     execution_provider: Optional[str] = None
     version: Optional[str] = None
     # Wave 6 adds "bf16" for ORT CPU EP on SPR+ (AMX) / Tiger Lake+ (AVX-512 BF16).
+    # Wave 14 extends bf16 to TensorRT on Ampere sm_80+ (config.set_flag(BF16)).
     dtype: Literal["fp32", "fp16", "bf16", "int8"]
     sparsity: Optional[str] = None
+    # Wave 14 A1: TRT 10.x BuilderConfig.builder_optimization_level (0-5, default=3).
+    # 5 runs exhaustive tactic autotune (3-5x build time) for +5-15% runtime fps.
+    # None = TRT default. Ignored by non-tensorrt engines.
+    builder_optimization_level: Optional[int] = Field(default=None, ge=0, le=5)
 
 
 class TechniqueSpec(BaseModel):
@@ -196,6 +201,10 @@ class Result(BaseModel):
     accuracy: AccuracyStats = Field(default_factory=AccuracyStats)
     meets_constraints: Optional[bool] = None
     notes: Optional[str] = None
+    # Wave 14 A1: TRT engine build wall-clock (seconds). None on non-TRT
+    # recipes and on historical JSONs. Populated when builder_optimization_level
+    # is set to track the build-time cost of aggressive tactic autotune.
+    build_time_s: Optional[float] = None
 
 
 def load_recipe(path: str) -> Recipe:

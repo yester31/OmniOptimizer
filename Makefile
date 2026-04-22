@@ -11,6 +11,7 @@ REPORT_CPU := report_cpu.md
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
         recipe-13 recipe-14 recipe-15 recipe-16 recipe-17 \
         recipe-30 recipe-31 recipe-32 recipe-33 recipe-34 recipe-35 \
+        recipe-40 recipe-41 recipe-42 \
         cpu-all cpu-report cpu-qr \
         diagnose-recipe-%
 
@@ -26,6 +27,7 @@ all: recipe-00 recipe-00-tf32 \
      recipe-01 recipe-04 recipe-05 recipe-06 \
      recipe-08 recipe-09 recipe-10 recipe-12 \
      recipe-13 recipe-14 recipe-15 recipe-16 \
+     recipe-40 recipe-41 recipe-42 \
      report
 
 env:
@@ -81,6 +83,19 @@ recipe-16:
 
 recipe-17:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/17_modelopt_int8_qat.yaml --out $(RESULTS_DIR)/17_modelopt_int8_qat.json
+
+# -----------------------------------------------------------------------------
+# Wave 14 TRT tuning (#40 opt_level=5, #41 bf16, #42 asymmetric INT8).
+# opt_level=5 build time can be 3-5x default; expect minutes per recipe.
+# -----------------------------------------------------------------------------
+recipe-40:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/40_trt_fp16_opt5.yaml --out $(RESULTS_DIR)/40_trt_fp16_opt5.json
+
+recipe-41:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/41_trt_bf16.yaml --out $(RESULTS_DIR)/41_trt_bf16.json
+
+recipe-42:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/42_modelopt_int8_asymmetric.yaml --out $(RESULTS_DIR)/42_modelopt_int8_asymmetric.json
 
 # Parked recipes keep their JSON on disk for history but are dropped from the
 # ranking. #7/#11 need sparsity-aware training.
