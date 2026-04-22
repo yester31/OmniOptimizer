@@ -17,6 +17,31 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+
+def _add_tensorrt_dll_dir() -> None:
+    """Register TRT wheel's DLL directory before ORT imports the TRT provider.
+
+    Wave 11 Task 0 finding (2026-04-22): pip-installed tensorrt 10.x drops
+    ``nvinfer_10.dll`` under ``site-packages/tensorrt_libs/`` but does not
+    add that directory to the Windows DLL search path. ``ort.get_available_
+    providers()`` still lists ``TensorrtExecutionProvider`` (stub check), so
+    the failure is silent — session creation falls back to CPU EP and fps
+    measurements become meaningless. See
+    ``docs/improvements/2026-04-22-wave11-task0-findings.md``.
+    """
+    try:
+        import tensorrt  # noqa: F401 — locate the wheel
+    except Exception:
+        return
+    site_parent = Path(tensorrt.__file__).resolve().parent.parent
+    libs_dir = site_parent / "tensorrt_libs"
+    if libs_dir.is_dir() and hasattr(os, "add_dll_directory"):
+        os.add_dll_directory(str(libs_dir))
+        os.environ["PATH"] = str(libs_dir) + os.pathsep + os.environ.get("PATH", "")
+
+
+_add_tensorrt_dll_dir()
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

@@ -1,7 +1,8 @@
 # Wave 11 Task 0 findings — 2026-04-22
 
-**Status**: Task 0 partial — 0.2 / 0.3 / 0.4 완료, 0.1 (recipe 재실행) 보류.
-**STOP 사유**: ORT 1.22.0 Windows 환경에서 `TensorrtExecutionProvider` 실제 로드 실패 확인. Wave 11 plan STOP 조건 ("fps 재현 protocol 문제") 보다 앞 단계에서 blocker 발견.
+**Status**: **RESOLVED 2026-04-22** — TRT EP DLL blocker 수복 완료. `scripts/run_ort.py::_add_tensorrt_dll_dir()` 추가로 `TensorrtExecutionProvider` primary 로드 확인. pytest 96 passed, 0 regression. Wave 11 Task 3 진입 가능 상태.
+
+**원 Status (archived below)**: Task 0 partial — 0.2 / 0.3 / 0.4 완료, 0.1 (recipe 재실행) 보류. STOP 사유: ORT 1.22.0 Windows 환경에서 `TensorrtExecutionProvider` 실제 로드 실패 확인.
 
 ## 환경 snapshot (Task 0.2 / 0.3)
 
