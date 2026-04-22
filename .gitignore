@@ -235,3 +235,4 @@ results_cpu/_ncnn_spike/
 logs/
 kernel.errors.txt
 modelopt_search_checkpoint*.pth
+.venv_dml/
