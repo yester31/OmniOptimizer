@@ -21,7 +21,7 @@ doc below for the incompatibility matrix. Full scope + architecture + commands i
 [`docs/architecture.md`](docs/architecture.md). Latest audit:
 [`docs/improvements/2026-04-18-trt-modelopt-audit.md`](docs/improvements/2026-04-18-trt-modelopt-audit.md).
 Wave 6 CPU inference shipped 2026-04-21 — see
-[`docs/plans/2026-04-21-wave6-cpu-inference.md`](docs/plans/2026-04-21-wave6-cpu-inference.md)
+[`docs/plans/_shipped/2026-04-21-wave6-cpu-inference.md`](docs/plans/_shipped/2026-04-21-wave6-cpu-inference.md)
 and `report_cpu_qr.md` at repo root for the 6-recipe ranking.
 Waves 7 and 8 both ARCHIVED 2026-04-21 after Task 0 spikes hit the
 same class of blocker: YOLO26n's end-to-end NMS pipeline (ReduceMax /
@@ -57,7 +57,7 @@ FastNAS maintains **93.8% speed while using 12.4% of engine
 size** — primary value is edge/embedded/VRAM-constrained
 deployment. Constraint `max_map_drop_pct: 5.0` (vs baseline
 1.5%p) reflects this trade-off.
-See [`docs/plans/2026-04-21-wave10-modelopt-fastnas-pruning.md`](docs/plans/2026-04-21-wave10-modelopt-fastnas-pruning.md),
+See [`docs/plans/_shipped/2026-04-21-wave10-modelopt-fastnas-pruning.md`](docs/plans/_shipped/2026-04-21-wave10-modelopt-fastnas-pruning.md),
 [`docs/improvements/2026-04-21-wave10-r1-spike-results.md`](docs/improvements/2026-04-21-wave10-r1-spike-results.md),
 and [`docs/improvements/2026-04-22-wave10-pruning-extended-eval.md`](docs/improvements/2026-04-22-wave10-pruning-extended-eval.md).
 

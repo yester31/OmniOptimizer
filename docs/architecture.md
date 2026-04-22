@@ -275,7 +275,7 @@ openvino}` 두 경로를 디스패치. `scripts/_weights_io.py`에서 TRT 독립
 - Smoke: `python scripts/run_cpu.py --recipe recipes/30_ort_cpu_fp32.yaml --out /tmp/smoke_30.json`
 - 풀 배치: `make cpu-all` (또는 QR 데이터셋: `make cpu-qr`)
 
-설계 스펙: `docs/plans/2026-04-21-wave6-cpu-inference.md`.
+설계 스펙: `docs/plans/_shipped/2026-04-21-wave6-cpu-inference.md`.
 R1 spike (OpenVINO + YOLO26n attention) CLEARED 기록도 해당 plan 파일에 포함.
 
 - **Windows-specific gotchas**:

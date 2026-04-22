@@ -62,7 +62,7 @@ SmoothQuant 재구현 시점.
 > `make all`에서는 자동 실행되지 않고, `make report` 순위표에서도 `--exclude`
 > 플래그로 빠집니다. #7/#11은 post-training 2:4 sparsity가 nano YOLO의 mAP를
 > 사실상 0으로 무너뜨린 것이 확인되어 sparsity-aware training 도입 시 재평가
-> (`docs/plans/2026-04-18-phase3-int8-accuracy.md` 참조). #19는 INC QAT로 학습 루프가
+> (`docs/plans/_shipped/2026-04-18-phase3-int8-accuracy.md` 참조). #19는 INC QAT로 학습 루프가
 > 필요해 동일 대기열.
 
 ## Quick start (Docker 권장)
