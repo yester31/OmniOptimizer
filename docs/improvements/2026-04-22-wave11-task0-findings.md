@@ -77,11 +77,17 @@ impact on performance (including unable to run CUDA graph).
 
 결과: fp16 Conv 가 GPU 에서 돌지만 precision 경계마다 CPU↔GPU 왕복 → p50 352ms = fps 2.8.
 
-**Fix 경로**:
-1. `onnxconverter_common.float16.convert_float_to_float16` 또는 `onnxruntime.tools.onnx_model_utils` 로 그래프 + IO 전부 fp16 conversion → Cast 제거 → Memcpy 0
-2. 또는 half-export 포기: recipe #03 을 fp32 ONNX + CUDA EP 로 변경 → dtype semantic 변경 (name 도 `ort_cuda_fp32` 로)
+**Fix 경로 시도 (2026-04-22 B1 fix 세션)**:
+1. `onnxconverter_common.float16.convert_float_to_float16(keep_io_types=False)` — **FAIL** (ONNX Type Error: Resize_output_cast0 tensor(float) vs tensor(float16))
+2. 위 + `op_block_list=['Resize']` — **FAIL** (동일 에러)
+3. `keep_io_types=True` — **FAIL** (동일 에러)
+4. **baseline 재확인**: fp32 ONNX + CUDA EP — **fps 7.5, 217 Memcpy nodes** → 원인은 precision 이 아님
 
-1번 권고 (recipe 정체성 유지). 별도 작업으로 분리 (Wave 11 Task 1 subtask).
+**진짜 원인 재확정 (2026-04-22 fp32 ONNX smoke)**:
+
+precision 무관. YOLO26n ONNX 내 특정 ops (TopK / GatherElements / NonMaxSuppression 등 end-to-end NMS pipeline) 가 ORT CUDA EP 에서 unsupported → 각 op 마다 CPU fallback → Memcpy 노드 주입. 이는 Wave 7 (torch.export), Wave 8 (ncnn), Wave 3 (INC) 이 archive 된 것과 같은 root cause class — ultralytics NMS ops 가 non-TRT/non-native backend 에서 처리 못 함.
+
+**결정 (2026-04-22): recipe #03 archive**. recipe 유지는 misleading (사용자가 "CUDA EP FP16 가속" 기대하지만 실제로는 CPU fallback 범벅). `recipes/_archived/03_ort_cuda_fp16.yaml` 이동. Makefile + batch scripts 에서 제거. results/_archived/, results_qr/_archived/ 에 history 보존.
 
 ## B3 Measurement (2026-04-22 smoke, post-fix)
 

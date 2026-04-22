@@ -36,9 +36,9 @@
 - [x] 1.1 session `sess.get_providers()` 확인 — CUDAExecutionProvider primary 정상 (2026-04-22)
 - [x] 1.2 `arena_extend_strategy` / `device_id` 확인 — 무관, root cause 는 graph level (2026-04-22)
 - [x] 1.3 session 로드 경고 확인 — `219 Memcpy nodes added` 확인 (2026-04-22)
-- [ ] 1.4 `onnxconverter_common.float16.convert_float_to_float16(..., keep_io_types=False)` 로 fp32 ONNX 를 full-graph fp16 (IO 포함) 변환 → 새 ONNX cache key `_allfp16`
-- [ ] 1.5 recipe #03 업데이트: export 경로를 `half=False` 로 바꾸고 `onnxconverter_common.float16` pass 를 `_export_onnx` 후단에 추가
-- [ ] 1.6 재측정 — Memcpy 0, fps 100+ 타겟 or 원인 문서화 후 `recipes/_archived/` 이동 결정
+- [x] 1.4 `onnxconverter_common.float16.convert_float_to_float16` 3가지 옵션 조합 모두 실패 (keep_io_types=False / op_block_list=['Resize'] / keep_io_types=True) — ONNX validation error "Type Error: Resize_output_cast0 tensor(float) vs tensor(float16)" (2026-04-22)
+- [x] 1.5 **본질 재확인 smoke** — fp32 ONNX + CUDA EP 도 **217 Memcpy / fps 7.5** — 원인은 precision 이 아니라 **YOLO26n end2end NMS ops (TopK/GatherElements/NonMaxSuppression) 가 CUDA EP 에서 unsupported** (Wave 7/8 archive 와 동일 class) (2026-04-22)
+- [x] 1.6 **Archive 결정** (2026-04-22 plan-eng-review Task 1.6 분기 선택): recipe #03 → `recipes/_archived/`, results/_archived/, results_qr/_archived/. Makefile + batch scripts 에서 제거. report_qr.md 재생성.
 
 ## Task 2: B2 — torchcompile_fp16 baseline 역전 debug
 

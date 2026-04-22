@@ -214,6 +214,7 @@ __marimo__/
 results/_engines/
 results/_onnx/
 results/_trt_timing.cache
+results/_trt_cache/
 results/_diag/
 results/_calib_eval_split/
 runs/
