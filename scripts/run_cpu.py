@@ -642,7 +642,7 @@ def _prepare_cpu_session(recipe: Recipe):
 
     raise RuntimeError(
         f"run_cpu does not support source={source!r} dtype={dtype!r}. "
-        f"GPU recipes (trt_builtin/modelopt/ort_quant/brevitas) must use run_trt.py."
+        f"GPU recipes (trt_builtin/modelopt/ort_quant) must use run_trt.py."
     )
 
 

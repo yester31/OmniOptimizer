@@ -10,7 +10,6 @@ REPORT_CPU := report_cpu.md
         recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 recipe-07 \
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
         recipe-13 recipe-14 recipe-15 recipe-16 recipe-17 \
-        recipe-20 recipe-21 recipe-22 \
         recipe-30 recipe-31 recipe-32 recipe-33 recipe-34 recipe-35 \
         cpu-all cpu-report cpu-qr \
         diagnose-recipe-%
@@ -27,7 +26,6 @@ all: recipe-00 recipe-00-tf32 \
      recipe-01 recipe-02 recipe-03 recipe-04 recipe-05 recipe-06 \
      recipe-08 recipe-09 recipe-10 recipe-12 \
      recipe-13 recipe-14 recipe-15 recipe-16 \
-     recipe-20 recipe-21 \
      report
 
 env:
@@ -90,18 +88,9 @@ recipe-16:
 recipe-17:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/17_modelopt_int8_qat.yaml --out $(RESULTS_DIR)/17_modelopt_int8_qat.json
 
-recipe-20:
-	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/20_brevitas_int8_percentile.yaml --out $(RESULTS_DIR)/20_brevitas_int8_percentile.json
-
-recipe-21:
-	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/21_brevitas_int8_mse.yaml --out $(RESULTS_DIR)/21_brevitas_int8_mse.json
-
-recipe-22:
-	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/22_brevitas_int8_entropy.yaml --out $(RESULTS_DIR)/22_brevitas_int8_entropy.json
-
 # Parked recipes keep their JSON on disk for history but are dropped from the
 # ranking. #7/#11 need sparsity-aware training.
-PARKED := brevitas_int8_entropy
+PARKED :=
 # CPU parked list: openvino_int8_qat is a reserved #36 slot (training
 # pipeline for OV not in Wave 6 scope). Present for forward compatibility.
 PARKED_CPU := openvino_int8_qat

@@ -29,8 +29,6 @@ declare -A RECIPES=(
     [15_ort_int8_percentile]="run_trt"
     [16_ort_int8_distribution]="run_trt"
     [17_modelopt_int8_qat]="run_trt"
-    [20_brevitas_int8_percentile]="run_trt"
-    [21_brevitas_int8_mse]="run_trt"
 )
 
 ORDER=(
@@ -46,7 +44,6 @@ ORDER=(
     13_ort_int8_minmax 14_ort_int8_entropy
     15_ort_int8_percentile 16_ort_int8_distribution
     17_modelopt_int8_qat
-    20_brevitas_int8_percentile 21_brevitas_int8_mse
 )
 
 for r in "${ORDER[@]}"; do

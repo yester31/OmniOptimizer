@@ -140,8 +140,8 @@ def test_dispatch_unknown_source_raises():
     """Non-CPU sources routed to run_cpu should fail loudly, not run silently."""
     from scripts import run_cpu
 
-    # brevitas is a GPU-only source — run_cpu should not accept it.
-    recipe = _make_recipe(source="brevitas", dtype="int8", engine="tensorrt")
+    # modelopt is a GPU-only source — run_cpu should not accept it.
+    recipe = _make_recipe(source="modelopt", dtype="int8", engine="tensorrt")
     with pytest.raises((NotImplementedError, ValueError, RuntimeError)):
         run_cpu._prepare_cpu_session(recipe)
 

@@ -18,7 +18,6 @@ ORDER=(
     10_modelopt_int8_percentile 12_modelopt_int8_mixed
     13_ort_int8_minmax 14_ort_int8_entropy
     15_ort_int8_percentile 16_ort_int8_distribution
-    20_brevitas_int8_percentile 21_brevitas_int8_mse
 )
 
 declare -A RUNNER=(
@@ -30,7 +29,6 @@ declare -A RUNNER=(
     [10_modelopt_int8_percentile]=run_trt [12_modelopt_int8_mixed]=run_trt
     [13_ort_int8_minmax]=run_trt [14_ort_int8_entropy]=run_trt
     [15_ort_int8_percentile]=run_trt [16_ort_int8_distribution]=run_trt
-    [20_brevitas_int8_percentile]=run_trt [21_brevitas_int8_mse]=run_trt
 )
 
 for r in "${ORDER[@]}"; do

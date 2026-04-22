@@ -34,9 +34,6 @@ trt = [
     "tensorrt>=10.0",
     "polygraphy>=0.49",
 ]
-brevitas = [
-    "brevitas>=0.11",
-]
 modelopt = ["nvidia-modelopt>=0.15"]
 cpu = [
     "openvino>=2024.3",
@@ -45,7 +42,7 @@ cpu = [
     "py-cpuinfo>=9.0",
 ]
 all = [
-    "omnioptimizer[torch,onnx,trt,brevitas,modelopt,cpu]",
+    "omnioptimizer[torch,onnx,trt,modelopt,cpu]",
 ]
 
 [project.scripts]

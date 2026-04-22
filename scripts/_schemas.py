@@ -29,7 +29,7 @@ class TechniqueSpec(BaseModel):
     # v1.1+ plans to add "modelopt" (nvidia-modelopt: torch-level quantization
     # + QDQ-ONNX export) and possibly "ort_quant" for ONNX Runtime's quantizer.
     source: Literal[
-        "trt_builtin", "modelopt", "ort_quant", "brevitas",
+        "trt_builtin", "modelopt", "ort_quant",
         # Wave 6: CPU backends. ort_cpu uses onnxruntime CPUExecutionProvider;
         # openvino uses Intel OpenVINO runtime directly (NNCF PTQ for INT8).
         "ort_cpu", "openvino",

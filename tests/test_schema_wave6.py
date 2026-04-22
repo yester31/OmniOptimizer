@@ -41,7 +41,7 @@ def test_technique_source_rejects_unknown():
 
 
 def test_technique_source_backward_compat_existing_sources():
-    for s in ("trt_builtin", "modelopt", "ort_quant", "brevitas"):
+    for s in ("trt_builtin", "modelopt", "ort_quant"):
         t = TechniqueSpec(name="x", source=s)
         assert t.source == s
 
