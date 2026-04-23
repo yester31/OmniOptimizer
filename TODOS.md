@@ -33,6 +33,27 @@
 
 ---
 
+## Wave 16 follow-ups (from Wave 15 adversarial review, 2026-04-23)
+
+### T6. `Result.build_ceiling_breached` bool field (MLPerf contract round-trip)
+
+- **What**: Add `build_ceiling_breached: Optional[bool]` to `scripts/_schemas.py::Result` and propagate from `run_trt.py::_build_engine`. Currently the ceiling warning is stderr-only; downstream consumers (recommend.py, CI dashboards) can't detect it.
+- **Why**: Wave 15 D3 added `MeasurementSpec.build_ceiling_s` but the breach signal doesn't round-trip through Result JSON. MLPerf-style reproducibility demands the measurement record carry the diagnostic outcome.
+- **Pros**: ~10 LOC, zero runtime cost, lets recommend.py flag builds that hit the ceiling.
+- **Cons**: Schema bump → existing `results_qr/*.json` need backfill (nullable field so forward-compat is free).
+- **Context**: 2026-04-23 Wave 15 ship adversarial review finding M7.
+- **Depends on**: none.
+
+### T7. ONNX cache key must include `nodes_to_exclude` hash
+
+- **What**: `scripts/_prepare_modelopt_onnx` tag currently keys on (calibrator, samples, seed) but NOT on `nodes_to_exclude`. Recipes #09 (no exclusions) and #12 (4 excluded Convs) share the same ONNX artifact `best_qr_640_modelopt_entropy_bs1.onnx`.
+- **Why**: Pre-existing bug. Whichever recipe runs first poisons the cache for the other. Currently masked because #12 isn't in the measurement pipeline, but any Wave 16 work adding more `nodes_to_exclude` variants will hit this.
+- **Fix**: Include `sha256(sorted(nodes_to_exclude))[:8]` in the cache filename.
+- **Context**: 2026-04-23 Wave 15 D2 measurement results §6; ship adversarial review finding H4.
+- **Depends on**: none, but should land before Wave 16 IgnoredScope work.
+
+---
+
 ## Wave 17+ Deferred (hardware / ecosystem)
 
 ### T3. BF16 inference hardware path (i7-11375H `avx512_bf16` 여부에 따라)
