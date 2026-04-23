@@ -15,6 +15,7 @@ record the problem in ``notes`` rather than crashing the whole ``make all``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -119,6 +120,44 @@ def _apply_modelopt_sparsify(weights: str, imgsz: int):
     return yolo
 
 
+def _modelopt_onnx_tag(recipe: Recipe, imgsz: int, *, dynamic: bool = True) -> str:
+    """Generate the cache filename for a modelopt-quantized ONNX artifact.
+
+    Extracted for testability (Wave 16 T7). Pure: no filesystem access, same
+    inputs → same output.
+
+    Tag components, in order:
+      - weights stem (e.g. ``best_qr``)
+      - image size
+      - ``modelopt``
+      - base calibrator (``max``/``entropy``/``percentile``)
+      - ``_asym`` if ``*_asymmetric`` calibrator suffix present (Wave 14 A5)
+      - ``_sparse24`` if 2:4 sparsity preprocess enabled
+      - ``_ex<sha8>`` if ``nodes_to_exclude`` is non-empty (Wave 16 T7 fix)
+      - ``bs1`` or ``dyn``
+
+    The Wave 16 T7 fix: recipes #09 (no exclusions) and #12 (4 Convs excluded)
+    previously shared the same cache filename. Whichever ran first poisoned
+    the other. Hashing a sorted ``|``-joined key keeps the tag short and
+    order-insensitive; empty ``nodes_to_exclude`` still produces the legacy
+    path so existing #09 artifacts remain valid.
+    """
+    calibrator = recipe.technique.calibrator or "max"
+    use_zero_point = calibrator.endswith("_asymmetric")
+    base_calibrator = calibrator[: -len("_asymmetric")] if use_zero_point else calibrator
+    sparsity_tag = "_sparse24" if recipe.technique.sparsity_preprocess == "2:4" else ""
+    asym_tag = "_asym" if use_zero_point else ""
+    bs_tag = "dyn" if dynamic else "bs1"
+    excludes_tag = ""
+    if recipe.technique.nodes_to_exclude:
+        excludes_key = "|".join(sorted(recipe.technique.nodes_to_exclude))
+        excludes_tag = "_ex" + hashlib.sha256(excludes_key.encode("utf-8")).hexdigest()[:8]
+    return (
+        f"{Path(recipe.model.weights).stem}_{imgsz}_modelopt_"
+        f"{base_calibrator}{asym_tag}{sparsity_tag}{excludes_tag}_{bs_tag}.onnx"
+    )
+
+
 def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
                            dynamic: bool = True) -> Path:
     """Quantize via modelopt.onnx — takes ultralytics' clean ONNX export and
@@ -143,21 +182,17 @@ def _prepare_modelopt_onnx(recipe: Recipe, imgsz: int, cache_dir: Path,
         ) from e
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    calibrator = recipe.technique.calibrator or "max"  # max | entropy | percentile | *_asymmetric
-    # Wave 14 A5: trailing "_asymmetric" suffix toggles use_zero_point=True
-    # in modelopt.onnx.quantize (base method unchanged).
-    use_zero_point = calibrator.endswith("_asymmetric")
-    base_calibrator = calibrator[: -len("_asymmetric")] if use_zero_point else calibrator
-    sparsity_tag = "_sparse24" if recipe.technique.sparsity_preprocess == "2:4" else ""
-    asym_tag = "_asym" if use_zero_point else ""
-    bs_tag = "dyn" if dynamic else "bs1"
-    tag = (
-        f"{Path(recipe.model.weights).stem}_{imgsz}_modelopt_"
-        f"{base_calibrator}{asym_tag}{sparsity_tag}_{bs_tag}.onnx"
-    )
+    tag = _modelopt_onnx_tag(recipe, imgsz, dynamic=dynamic)
     cached = cache_dir / tag
     if cached.exists():
         return cached
+
+    # Re-derive the calibrator/sparsity bits the quantize call + log line need.
+    # Kept in sync with _modelopt_onnx_tag (the source of truth for the naming).
+    calibrator = recipe.technique.calibrator or "max"
+    use_zero_point = calibrator.endswith("_asymmetric")
+    base_calibrator = calibrator[: -len("_asymmetric")] if use_zero_point else calibrator
+    sparsity_tag = "_sparse24" if recipe.technique.sparsity_preprocess == "2:4" else ""
 
     if recipe.technique.sparsity_preprocess == "2:4":
         # For modelopt trained recipes, _get_weights_or_yolo() returns the
