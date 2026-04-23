@@ -570,6 +570,7 @@ def _build_engine(
     quant_preapplied: bool = False,
     enable_tf32: bool = False,
     builder_optimization_level: Optional[int] = None,
+    build_ceiling_s: Optional[int] = None,
 ) -> tuple[Optional[Path], Optional[str], Optional[float]]:
     """Build a TensorRT engine. Returns (engine_path, note-or-None, build_time_s).
 
@@ -584,8 +585,15 @@ def _build_engine(
     ``nvinfer.BuilderConfig.builder_optimization_level`` (range 0-5,
     default=3). Level 5 runs exhaustive autotune; build time grows 3-5x
     but tactic selection stabilizes and runtime fps typically climbs
-    +5-15%. Hard 600s build-time ceiling (outside voice F7) — exceeded →
-    return failure note instead of hanging the recipe bank run.
+    +5-15%.
+
+    Wave 15 D3: ``build_ceiling_s`` (default 600s) is diagnostic only —
+    exceeding it logs a structured warning but the build still completes
+    and the engine is returned. Rationale: ceiling-triggered hard-fails
+    force the operator to rebuild with a different flag set; for audit /
+    reproducibility runs we prefer a completed engine + clear note so
+    recommend.py can still rank the recipe (with the build-time penalty
+    visible in Result.build_time_s).
     """
     import time as _time
     t0 = _time.perf_counter()
@@ -717,13 +725,16 @@ def _build_engine(
     if serialized is None:
         return None, "engine build returned None", build_time_s
 
-    # Wave 14 outside voice F7: 600s ceiling guard. opt_level=5 on bigger
-    # models has shipped over 10 minutes in practice; warn so the operator
-    # can decide whether to lower the level for subsequent recipes.
-    if build_time_s > 600.0:
+    # Wave 14 outside voice F7 + Wave 15 D3: recipe-configurable ceiling.
+    # opt_level=5 on bigger models can take 10+ minutes; warn so the
+    # operator can decide whether to lower the level for later recipes.
+    # Never hard-fails — diagnostic output only, engine returned regardless.
+    _ceiling = build_ceiling_s if build_ceiling_s is not None else 600
+    if build_time_s > _ceiling:
         print(
-            f"[warn] build_time_s={build_time_s:.0f}s exceeds 600s ceiling — "
-            f"consider lowering builder_optimization_level for this recipe",
+            f"[warn] build_time_s={build_time_s:.0f}s exceeds {_ceiling}s ceiling "
+            f"(builder_optimization_level={builder_optimization_level or 3}) — "
+            f"consider lowering the level or raising measurement.build_ceiling_s",
             file=sys.stderr,
         )
 
@@ -887,6 +898,11 @@ def run(recipe_path: str, out_path: str) -> int:
     cold_start_ms: Optional[float] = None
     bs1_engine: Optional[Path] = None  # referenced later for mAP eval
     build_time_s_bs1: Optional[float] = None  # Wave 14 A1: bs1 build time
+    # Wave 16 D1: True once any bs build exceeded the ceiling, False once any
+    # build succeeded under the ceiling, None if every build failed. Writes
+    # True are sticky — a later under-ceiling build cannot mask an earlier
+    # breach.
+    build_ceiling_breached: Optional[bool] = None
 
     source = recipe.technique.source
     source_suffix = _SOURCE_TAG.get(source, f"_{source}")
@@ -913,6 +929,7 @@ def run(recipe_path: str, out_path: str) -> int:
             quant_preapplied=quant_preapplied,
             enable_tf32=enable_tf32,
             builder_optimization_level=recipe.runtime.builder_optimization_level,
+            build_ceiling_s=recipe.measurement.build_ceiling_s,
         )
         if built is None:
             note_parts.append(f"bs={bs}: build failed ({err})")
@@ -920,6 +937,18 @@ def run(recipe_path: str, out_path: str) -> int:
         if bs == 1:
             bs1_engine = built
             build_time_s_bs1 = build_time_s
+
+        # Wave 16 D1: track ceiling breach for round-trip into Result JSON.
+        # Mirror _build_engine's 600s default when recipe doesn't override.
+        _ceiling = (
+            recipe.measurement.build_ceiling_s
+            if recipe.measurement.build_ceiling_s is not None
+            else 600
+        )
+        if build_time_s > _ceiling:
+            build_ceiling_breached = True
+        elif build_ceiling_breached is None:
+            build_ceiling_breached = False
 
         try:
             def _load(e=built, b=bs):
@@ -1019,6 +1048,7 @@ def run(recipe_path: str, out_path: str) -> int:
         cold_start_ms=cold_start_ms,
         accuracy=acc,
         build_time_s=build_time_s_bs1,
+        build_ceiling_breached=build_ceiling_breached,
         meets_constraints=meets,
         notes="; ".join(note_parts) or None,
     )

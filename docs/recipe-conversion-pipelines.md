@@ -77,6 +77,22 @@ yolo26n.pt
 - Line 77: `_export_onnx` — ultralytics YOLO.export(format='onnx') 래퍼
 - Line 95-135: `_make_session` — provider 옵션 주입 + session 검증
 
+**Wave 15 D1.2 추가 옵션** (`scripts/run_ort.py::_make_session`):
+```
+trt_opts = {
+    "trt_engine_cache_enable": True,
+    "trt_engine_cache_path": results/_trt_cache/,
+    "trt_fp16_enable": (dtype == "fp16"),
+    "trt_builder_optimization_level": 5,    # Wave 14 #40 +48% FP16 뒷받침
+    "trt_timing_cache_enable": True,         # 레시피 간 tactic timing 재사용
+    "trt_timing_cache_path": results/_trt_cache/,
+    "trt_detailed_build_log": True,
+}
+```
+구버전 ORT 가 새 키를 rejection 하면 `(ValueError, RuntimeError)` 만 catch
+해서 Wave 15 키를 제거한 legacy provider_options 로 1회 retry. 다른 예외는
+전파 (post-ship 리뷰 narrowing).
+
 **특징**:
 - ORT 가 TRT 를 wrapper 로 호출. fps 는 native TRT 대비 ~43% 수준 (구조적 오버헤드).
 - AMD / Intel GPU 에도 동일 인터페이스 (Wave 9 DirectML EP 참조).
@@ -105,6 +121,9 @@ yolo26n.pt
     ↓
     ↓ [선택: Wave 14 A1] builder_optimization_level=5
     ↓   exhaustive autotune (build 3-5× 시간)
+    ↓   Wave 15 D3: measurement.build_ceiling_s (diagnostic only)
+    ↓     > ceiling → stderr warning, engine 은 그대로 반환
+    ↓     (legacy 600s default, opt_level=5 INT8 는 900-1200s 권장)
     ↓
     ↓ optimization_profile 고정 (bs, 3, 640, 640)
     ↓ builder.build_serialized_network(network, config)  # 타이밍 측정
@@ -414,6 +433,13 @@ yolo26n.pt
 - Line 481-511: `_compile_openvino` — batch-size aware hint
 - Line 511: `_prepare_openvino_fp32`
 
+**Wave 15 D1.1** (`_get_ov_core`): 싱글톤 Core 생성 시
+`results_cpu/_ov_cache/` 를 `CACHE_DIR` 로 설정. 첫 실행은 kernel compile
+(~2000 ms)이지만 두 번째부터 compiled-blob 디스크 replay 로 cold_start
+~400 ms. byte-for-byte blob 이라 정확도 영향 없음. mkdir / set_property
+실패는 `(OSError, ValueError, RuntimeError)` 만 catch, Core 자체는 그대로
+사용 (warning 만 stderr).
+
 **특징**:
 - IR 캐시: 2회차부터 `read_model` 에 xml 직접 읽어 ONNX 재파싱 skip.
 - `INFERENCE_NUM_THREADS` 를 명시해 hyperthread 포함 로직 방지.
@@ -495,5 +521,6 @@ runner 공통:
 - Architecture: [`docs/architecture.md`](architecture.md)
 - Wave 11 Task 5 (#33 fix): [`docs/plans/2026-04-22-wave11-recipe-debug-cleanup.md`](plans/2026-04-22-wave11-recipe-debug-cleanup.md)
 - Wave 14 (asymmetric / opt_level / BF16): [`docs/plans/2026-04-22-wave14-trt-optimization.md`](plans/2026-04-22-wave14-trt-optimization.md)
+- Wave 15 (audit-driven tuning · OV CACHE_DIR / ORT TRT EP / build_ceiling_s): [`docs/improvements/2026-04-23-wave15-results.md`](improvements/2026-04-23-wave15-results.md)
 - Schema: `scripts/_schemas.py`
 - Runner roots: `scripts/run_{pytorch,ort,trt,cpu}.py`

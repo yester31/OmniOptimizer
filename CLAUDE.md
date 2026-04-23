@@ -17,6 +17,18 @@ Wave 14 (TRT tuning) SHIPPED 2026-04-22 — #40 `trt_fp16_opt5` (fps 645.2,
 +48% over #05 FP16 via `builder_optimization_level=5`) + #41 `trt_bf16` +
 #42 `modelopt_int8_asymmetric` (**NEW TOP at fps 770.5**, dethrones
 entropy 763.9 via `use_zero_point=True`).
+Wave 15 (audit-driven tuning) SHIPPED 2026-04-23 with mixed outcome:
+D1 no-regret switches landed (OpenVINO `CACHE_DIR` persistent kernel
+cache, ORT TRT EP `trt_builder_optimization_level=5` + timing cache
+with backward-compat fallback). D3 `MeasurementSpec.build_ceiling_s`
+schema added for per-recipe build-time-warning config. **D2 opt_level=5
+opt-in to #09/#12/#42 ROLLED BACK** after measurement — INT8 modelopt
+recipes sit near the tactic-selection ceiling at opt_level=3, and
+opt_level=5 trades bs=8 throughput (-9 to -60%) for no bs=1 gain. Wave
+14 #40's +48% was FP16-specific (headroom-dependent). See
+[`docs/plans/2026-04-23-wave15-audit-driven-tuning.md`](docs/plans/2026-04-23-wave15-audit-driven-tuning.md)
+and
+[`docs/improvements/2026-04-23-wave15-results.md`](docs/improvements/2026-04-23-wave15-results.md).
 Intel Neural Compressor was evaluated (Wave 3) and removed — see the audit
 below. Brevitas recipes (#20-#22) archived 2026-04-22 (redundant with
 `modelopt_int8_entropy`; Q/DQ asymmetry ruled out as cause of fps deficit).

@@ -12,6 +12,20 @@ is archived — they stay retired so result-JSON history keeps a stable identity
 | `25-29` | Reserved | — |
 | `30-35` | CPU — ORT CPU EP / OpenVINO | `run_cpu.py` |
 | `36-38` | CPU — FastNAS (pruning) variants | `run_cpu.py` |
+| `39` | Reserved | — |
+| `40-49` | GPU — TRT tuning variants (Wave 14+ opt_level / dtype / zero-point knobs) | `run_trt.py` |
+
+## Wave 15 convention — `builder_optimization_level` opt-in
+
+Recipes may set `runtime.builder_optimization_level: 5` explicitly to request
+exhaustive TRT tactic autotune. Leaving the field unset (default) selects
+TRT's own default (3). Per-recipe opt-in is preferred over a global schema
+default so `results/*.json` and `results_qr/*.json` retain MLPerf-style
+reproducibility — the recipe file fully specifies the build configuration.
+
+When opt-in, also raise `measurement.build_ceiling_s` above 600 (1200 is
+a safe ceiling for INT8 + opt_level=5 on YOLO26n) so the diagnostic warning
+only fires when a build genuinely hangs.
 
 When adding a recipe:
 

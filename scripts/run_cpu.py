@@ -440,11 +440,29 @@ _OV_CORE: Any = None  # openvino.Core singleton, lazy-initialized
 
 def _get_ov_core():
     """Return a cached ``openvino.Core`` — creating one costs ~300ms and
-    reinitializing per recipe dominates cold_start_ms in batch runs."""
+    reinitializing per recipe dominates cold_start_ms in batch runs.
+
+    Wave 15 D1.1: sets ``CACHE_DIR`` so compiled-blob kernel output persists
+    across sessions. First recipe cold_start stays ~2000ms (kernel compile),
+    subsequent runs replay from disk (~400ms). Accuracy zero-impact (cache
+    is a byte-for-byte blob, not a lossy optimization). Disk fallback is
+    silent: permission / IO errors leave the core usable at the expense of
+    the cache speedup.
+    """
     global _OV_CORE
     if _OV_CORE is None:
         import openvino as ov
         _OV_CORE = ov.Core()
+        try:
+            cache_dir = Path("results_cpu/_ov_cache")
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            _OV_CORE.set_property({"CACHE_DIR": str(cache_dir)})
+        except (OSError, ValueError, RuntimeError) as e:
+            # Narrowed from bare Exception so MemoryError / KeyboardInterrupt
+            # propagate. OSError covers mkdir permission/IO; ValueError and
+            # RuntimeError cover OV's set_property rejection modes.
+            print(f"[warn] OV CACHE_DIR setup failed ({e}); running without cache",
+                  file=sys.stderr)
     return _OV_CORE
 
 

@@ -177,6 +177,53 @@ Beyond the critical rules kept in CLAUDE.md, these guide runner development:
   - Per-channel weights on `axis=0` for Conv; per-tensor for activations.
   - Run ORT's `quant_pre_process` (shape inference + folding) before
     `quantize_static` — otherwise histogram calibrators OOM on attention graphs.
+
+## Wave 15 — Audit-driven runtime tuning (2026-04-23)
+
+Audit-driven, no-regret knob tuning. No new recipes; the change surface
+is runner config + schema. Mixed outcome — D1/D3 shipped, D2 rolled back.
+
+- **D1.1 · OpenVINO CACHE_DIR** (`scripts/run_cpu.py::_get_ov_core`). The
+  cached `openvino.Core` now sets `CACHE_DIR=results_cpu/_ov_cache` so
+  compiled-blob kernel output persists across sessions. First recipe
+  cold_start is unchanged (~2000 ms — kernel compile); subsequent runs
+  replay from disk (~400 ms). Accuracy zero-impact (byte-for-byte blob).
+  Disk errors (permission / IO) silently degrade — `_get_ov_core` narrows
+  the guard to `(OSError, ValueError, RuntimeError)` so `MemoryError` /
+  `KeyboardInterrupt` still propagate.
+- **D1.2 · ORT TRT EP options** (`scripts/run_ort.py::_make_session`).
+  Match Wave 14 native TRT defaults on the EP side:
+  `trt_builder_optimization_level=5`, `trt_timing_cache_enable=True`,
+  `trt_timing_cache_path=results/_trt_cache`, `trt_detailed_build_log=True`.
+  Older ORT builds that don't recognize these keys raise on session init;
+  the runner strips the Wave 15 additions and retries once so the path
+  stays compatible. Retry guard narrowed to `(ValueError, RuntimeError)`
+  — other exception classes propagate.
+- **D3 · `MeasurementSpec.build_ceiling_s`** (`scripts/_schemas.py`).
+  Per-recipe diagnostic ceiling for TRT engine build wall-clock. Breach
+  logs a structured warning in `Result.notes` **but never hard-fails** —
+  the engine is returned regardless, so `recommend.py` can still rank the
+  recipe with the build-time penalty visible in `Result.build_time_s`.
+  Default `None` → legacy 600 s warning threshold; recipes that opt into
+  `builder_optimization_level=5` should raise to 900–1200 s (INT8 +
+  opt_level=5 on YOLO26n has shipped at 10+ minutes in practice).
+- **D2 · `builder_optimization_level=5` opt-in to INT8 modelopt recipes
+  (#09/#12/#42)** — **ROLLED BACK**. Measurement on RTX 3060 Laptop showed
+  bs=1 flat or −2 % and bs=8 regressed −9 % to −60 %. INT8 modelopt sits
+  near the tactic-selection ceiling at opt_level=3; Wave 14 #40's +48 %
+  gain was FP16-specific (headroom-dependent). The three recipe YAMLs
+  retain the config keys but with opt_level=5 reverted to the default.
+  See [`docs/improvements/2026-04-23-wave15-results.md`](improvements/2026-04-23-wave15-results.md).
+- **Post-ship adversarial review**: bare `except Exception` clauses in
+  `run_ort.py:141` (session init retry) and `run_cpu.py:460` (OV
+  CACHE_DIR setup) narrowed to specific subclasses. Rationale: swallowing
+  `MemoryError` / `KeyboardInterrupt` / `SystemExit` inside runner
+  fallback paths masks real stop conditions during long batch runs.
+
+**Recipe bank convention** (`recipes/README.md`): per-recipe opt-in for
+`builder_optimization_level` is preferred over a schema default so
+`results/*.json` keep MLPerf-style reproducibility — the YAML fully
+specifies the build configuration.
 ## Wave 5 — Training pipeline (2026-04-20)
 
 QAT/sparsity 레시피는 recipe YAML의 ``technique.training`` 섹션으로 학습

@@ -8,6 +8,12 @@ runtime:
   engine: tensorrt
   version: null
   dtype: int8
+  # Wave 15 D2 attempted opt_level=5 here and ROLLED BACK after measurement:
+  # bs1 -0.8% and bs8 -60% on RTX 3060 Laptop (QR, 2026-04-23). INT8 modelopt
+  # recipes sit near the tactic-selection ceiling at opt_level=3, and opt_level=5
+  # shifts to different bs8 kernels that regress throughput. Fp16 baselines
+  # with more headroom (Wave 14 #40) still benefit; INT8 modelopt does not.
+  # Evidence: docs/improvements/2026-04-23-wave15-results.md
 technique:
   name: int8_ptq
   source: modelopt
