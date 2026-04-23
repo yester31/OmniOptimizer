@@ -29,6 +29,25 @@ opt_level=5 trades bs=8 throughput (-9 to -60%) for no bs=1 gain. Wave
 [`docs/plans/2026-04-23-wave15-audit-driven-tuning.md`](docs/plans/2026-04-23-wave15-audit-driven-tuning.md)
 and
 [`docs/improvements/2026-04-23-wave15-results.md`](docs/improvements/2026-04-23-wave15-results.md).
+Wave 16 (post-T1 fact-driven scope) SHIPPED 2026-04-23 as thin scope:
+**D1 `Result.build_ceiling_breached` bool field** round-trips Wave 15
+D3's ceiling signal through Result JSON so `recommend.py` can surface
+breaches in a `## Build-Time Ceiling Breaches` report section. T1
+(`scripts/audit_capabilities.py` + `results/_capabilities.json`
+snapshot) froze four capability facts; findings killed three of four
+originally planned workstreams: YOLO26n has **no MHA pattern** (4
+MatMul, 0 feed Softmax), i7-11375H lacks AVX-512_BF16 / AMX
+(hardware-blocked `#43_openvino_bf16` deferred to Wave 17+),
+NNCF IgnoredScope work un-needed. T7 (ONNX cache key
+`nodes_to_exclude` hash) closed pre-existing cache-poisoning bug
+where #09 and #12 shared `best_qr_640_modelopt_entropy_bs1.onnx`.
+End-to-end validation caught a D1 latent crash on cached-engine
+path (`build_time_s=None` vs `_ceiling` TypeError); fix refactored
+tracker into `_advance_ceiling_tracker` helper with explicit None
+handling and sticky-True semantics across the bs loop. See
+[`docs/plans/2026-04-23-wave16-plan.md`](docs/plans/2026-04-23-wave16-plan.md)
+and
+[`docs/improvements/2026-04-23-wave16-d1-validation.md`](docs/improvements/2026-04-23-wave16-d1-validation.md).
 Intel Neural Compressor was evaluated (Wave 3) and removed — see the audit
 below. Brevitas recipes (#20-#22) archived 2026-04-22 (redundant with
 `modelopt_int8_entropy`; Q/DQ asymmetry ruled out as cause of fps deficit).
