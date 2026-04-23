@@ -134,6 +134,48 @@ def test_recommend_report_shows_breach_section_when_present():
     )
 
 
+def test_advance_ceiling_tracker_none_build_time_keeps_prev():
+    """Cached-engine path returns build_time_s=None — tracker must not crash.
+
+    Regression for the Wave 16 D1 end-to-end validation bug: the merged code
+    tried to compare None > ceiling, raising TypeError. No build happened ⇒
+    no signal to record.
+    """
+    from scripts.run_trt import _advance_ceiling_tracker
+
+    assert _advance_ceiling_tracker(None, None, 600) is None
+    assert _advance_ceiling_tracker(True, None, 600) is True
+    assert _advance_ceiling_tracker(False, None, 600) is False
+
+
+def test_advance_ceiling_tracker_breach_sets_true():
+    from scripts.run_trt import _advance_ceiling_tracker
+
+    assert _advance_ceiling_tracker(None, 1200.0, 600) is True
+    # Sticky: an earlier False cannot block a later True.
+    assert _advance_ceiling_tracker(False, 1200.0, 600) is True
+    # Sticky: earlier True stays True.
+    assert _advance_ceiling_tracker(True, 1200.0, 600) is True
+
+
+def test_advance_ceiling_tracker_under_ceiling_promotes_none_to_false():
+    from scripts.run_trt import _advance_ceiling_tracker
+
+    assert _advance_ceiling_tracker(None, 120.0, 600) is False
+
+
+def test_advance_ceiling_tracker_under_ceiling_never_demotes_true():
+    """Sticky-True invariant: a later under-ceiling build cannot mask an
+    earlier breach across the bs loop."""
+    from scripts.run_trt import _advance_ceiling_tracker
+
+    # Scenario: bs=1 breached (True), bs=8 builds fast (< ceiling).
+    after_bs1 = _advance_ceiling_tracker(None, 1200.0, 600)
+    assert after_bs1 is True
+    after_bs8 = _advance_ceiling_tracker(after_bs1, 50.0, 600)
+    assert after_bs8 is True  # must NOT flip back to False
+
+
 def test_recommend_report_tolerates_historical_rows_without_breach_key():
     """Rows produced from historical JSONs (via .get()) → no KeyError, no section."""
     from scripts.recommend import format_report

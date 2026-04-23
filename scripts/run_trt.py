@@ -120,6 +120,37 @@ def _apply_modelopt_sparsify(weights: str, imgsz: int):
     return yolo
 
 
+def _advance_ceiling_tracker(
+    prev: Optional[bool],
+    build_time_s: Optional[float],
+    ceiling: int,
+) -> Optional[bool]:
+    """Wave 16 D1 — sticky-True ceiling-breach tracker across the bs loop.
+
+    Semantics table:
+
+    - ``build_time_s is None`` (``_build_engine`` hit the cached-engine path
+      at line 608 — no build happened): return prev unchanged. Absence of a
+      build is absence of signal; don't flip None → False.
+    - ``build_time_s > ceiling``: sticky True. A later under-ceiling build
+      cannot mask an earlier breach.
+    - ``build_time_s <= ceiling`` and prev is None: first fresh build came
+      in clean, promote None → False.
+    - ``build_time_s <= ceiling`` and prev is True: keep True (sticky).
+
+    Extracted for testability after the end-to-end D1 validation caught the
+    cached-engine path crash — refactor ensures the semantics are pinned
+    down in one place and exercised by unit tests.
+    """
+    if build_time_s is None:
+        return prev
+    if build_time_s > ceiling:
+        return True
+    if prev is None:
+        return False
+    return prev
+
+
 def _modelopt_onnx_tag(recipe: Recipe, imgsz: int, *, dynamic: bool = True) -> str:
     """Generate the cache filename for a modelopt-quantized ONNX artifact.
 
@@ -939,16 +970,14 @@ def run(recipe_path: str, out_path: str) -> int:
             build_time_s_bs1 = build_time_s
 
         # Wave 16 D1: track ceiling breach for round-trip into Result JSON.
-        # Mirror _build_engine's 600s default when recipe doesn't override.
         _ceiling = (
             recipe.measurement.build_ceiling_s
             if recipe.measurement.build_ceiling_s is not None
             else 600
         )
-        if build_time_s > _ceiling:
-            build_ceiling_breached = True
-        elif build_ceiling_breached is None:
-            build_ceiling_breached = False
+        build_ceiling_breached = _advance_ceiling_tracker(
+            build_ceiling_breached, build_time_s, _ceiling
+        )
 
         try:
             def _load(e=built, b=bs):
