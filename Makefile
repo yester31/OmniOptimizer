@@ -10,9 +10,11 @@ REPORT_CPU := report_cpu.md
         recipe-01 recipe-04 recipe-05 recipe-06 recipe-07 \
         recipe-08 recipe-09 recipe-10 recipe-11 recipe-12 \
         recipe-13 recipe-14 recipe-15 recipe-16 recipe-17 \
+        recipe-23 recipe-24 \
         recipe-30 recipe-31 recipe-32 recipe-33 recipe-34 recipe-35 \
+        recipe-36 recipe-37 recipe-38 \
         recipe-40 recipe-41 recipe-42 \
-        cpu-all cpu-report cpu-qr \
+        cpu-all cpu-report cpu-qr fastnas-gpu fastnas-cpu \
         diagnose-recipe-%
 
 # Re-run a single recipe:  make recipe-11
@@ -85,6 +87,21 @@ recipe-17:
 	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/17_modelopt_int8_qat.yaml --out $(RESULTS_DIR)/17_modelopt_int8_qat.json
 
 # -----------------------------------------------------------------------------
+# Wave 10 GPU FastNAS pruning + INT8 (#23, #24). Require the pruned +
+# fine-tuned weights at trained_weights/23_fastnas_*/weights/best.pt —
+# produced by scripts/_spike_wave10_*.py. Excluded from `make all` because
+# they depend on a pre-existing training artifact (like #17 QAT).
+# Combined path: engine size ~5MB vs baseline 38MB (edge/embedded target).
+# -----------------------------------------------------------------------------
+recipe-23:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/23_modelopt_fastnas_int8.yaml --out $(RESULTS_DIR)/23_modelopt_fastnas_int8.json
+
+recipe-24:
+	$(PYTHON) scripts/run_trt.py --recipe $(RECIPES_DIR)/24_modelopt_fastnas_sp_int8.yaml --out $(RESULTS_DIR)/24_modelopt_fastnas_sp_int8.json
+
+fastnas-gpu: recipe-23 recipe-24
+
+# -----------------------------------------------------------------------------
 # Wave 14 TRT tuning (#40 opt_level=5, #41 bf16, #42 asymmetric INT8).
 # opt_level=5 build time can be 3-5x default; expect minutes per recipe.
 # -----------------------------------------------------------------------------
@@ -129,6 +146,22 @@ recipe-34:
 
 recipe-35:
 	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/35_openvino_int8_nncf.yaml --out $(RESULTS_CPU_DIR)/35_openvino_int8_nncf.json
+
+# -----------------------------------------------------------------------------
+# Wave 10 CPU FastNAS variants (#36 OV+INT8+NNCF, #37 OV+FP32, #38 ORT+FP32).
+# Same training-artifact dependency as GPU FastNAS (#23/#24) — excluded from
+# `make cpu-all` until the training pipeline is part of CI.
+# -----------------------------------------------------------------------------
+recipe-36:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/36_openvino_fastnas_int8_nncf.yaml --out $(RESULTS_CPU_DIR)/36_openvino_fastnas_int8_nncf.json
+
+recipe-37:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/37_openvino_fastnas_fp32.yaml --out $(RESULTS_CPU_DIR)/37_openvino_fastnas_fp32.json
+
+recipe-38:
+	$(PYTHON) scripts/run_cpu.py --recipe $(RECIPES_DIR)/38_ort_cpu_fastnas_fp32.yaml --out $(RESULTS_CPU_DIR)/38_ort_cpu_fastnas_fp32.json
+
+fastnas-cpu: recipe-36 recipe-37 recipe-38
 
 # Full CPU bank + report. Does NOT include `recipe-31` automatically if
 # the host lacks BF16 ISA (the recipe self-skips with a notes entry).
