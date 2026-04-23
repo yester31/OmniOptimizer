@@ -3,16 +3,18 @@
 Vision 모델을 특정 기기에 배포할 때, 여러 추론 엔진 × 여러 최적화 기법을
 자동으로 돌려 보고 "이 환경엔 이게 제일 낫다"는 1등 추천을 뱉는 도구.
 
-v1.6은 **YOLO26n × NVIDIA GPU 1대 + x86_64 Intel CPU**에서 GPU 22장(#00–#22) +
-CPU 6장(#30–#35) 총 28장 레시피를 돌립니다. CPU 경로는 Wave 6(2026-04-21)
-추가 — ORT CPU EP / OpenVINO + NNCF PTQ.
+**YOLO26n × NVIDIA GPU 1대 + x86_64 Intel CPU** 에서 **활성 레시피 31장**을
+돌립니다 (GPU 19 + CPU 9 + TRT tuning 3). CPU 경로는 Wave 6 (2026-04-21) 추가
+— ORT CPU EP / OpenVINO + NNCF PTQ / FastNAS pruning 변형.
+
+**현재 TOP (Wave 14, 2026-04-22):** `#42 modelopt_int8_asymmetric` fps **770.5**
+(recipe bank TOP). `#40 trt_fp16_opt5` fps **645.2** (+48% vs baseline #05
+via `builder_optimization_level=5`).
 
 | #  | Runtime                    | Technique                                        | Source       |
 |---:|----------------------------|--------------------------------------------------|--------------|
 | 0  | TensorRT                   | FP32 / TF32 baselines (00 + 00-tf32)             | `trt_builtin`|
 | 1  | PyTorch eager              | FP32 (baseline)                                  | —            |
-| 2  | PyTorch + `torch.compile`  | FP16                                             | —            |
-| 3  | ONNX Runtime (CUDA EP)     | FP16                                             | —            |
 | 4  | ONNX Runtime (TensorRT EP) | FP16                                             | —            |
 | 5  | TensorRT                   | FP16                                             | —            |
 | 6  | TensorRT                   | INT8 PTQ (entropy, 512 calib samples)            | `trt_builtin`|
@@ -27,19 +29,26 @@ CPU 6장(#30–#35) 총 28장 레시피를 돌립니다. CPU 경로는 Wave 6(20
 | 15 | TensorRT                   | INT8 PTQ (ort_quant, percentile)                 | `ort_quant`  |
 | 16 | TensorRT                   | INT8 PTQ (ort_quant, distribution)               | `ort_quant`  |
 | 17 | TensorRT                   | INT8 QAT (modelopt, 30 epoch)                    | `modelopt`   |
-| 20 | TensorRT                   | INT8 PTQ (brevitas, percentile)                  | `brevitas`   |
-| 21 | TensorRT                   | INT8 PTQ (brevitas, MSE)                         | `brevitas`   |
-| 22 | TensorRT                   | INT8 PTQ (brevitas, entropy) — **parked**        | `brevitas`   |
+| 23 | TensorRT                   | FastNAS pruning + INT8 (modelopt, Wave 10)       | `modelopt_fastnas` |
+| 24 | TensorRT                   | FastNAS + 2:4 sparsity + INT8                    | `modelopt_fastnas` |
 | 30 | ONNX Runtime (CPU EP)      | FP32 (CPU baseline, Wave 6)                      | `ort_cpu`    |
-| 31 | ONNX Runtime (CPU EP)      | BF16 — AMX/AVX512 BF16 gated (self-skip 없으면)  | `ort_cpu`    |
+| 31 | ONNX Runtime (CPU EP)      | BF16 — AMX/AVX512 BF16 gated (hardware skip)     | `ort_cpu`    |
 | 32 | ONNX Runtime (CPU EP)      | INT8 dynamic (QUInt8 weight-only)                | `ort_cpu`    |
 | 33 | ONNX Runtime (CPU EP)      | INT8 static QDQ (entropy, VNNI)                  | `ort_cpu`    |
 | 34 | OpenVINO                   | FP32 IR (CPU LATENCY/THROUGHPUT hint)            | `openvino`   |
 | 35 | OpenVINO                   | INT8 PTQ (NNCF MIXED preset)                     | `openvino`   |
+| 36 | OpenVINO                   | FastNAS + INT8 NNCF                              | `openvino_fastnas` |
+| 37 | OpenVINO                   | FastNAS + FP32                                   | `openvino_fastnas` |
+| 38 | ONNX Runtime (CPU EP)      | FastNAS + FP32                                   | `ort_cpu`    |
+| 40 | TensorRT                   | FP16 + `builder_optimization_level=5` (Wave 14)  | —            |
+| 41 | TensorRT                   | BF16 (Ampere sm_80+, Wave 14)                    | —            |
+| 42 | TensorRT                   | INT8 PTQ (modelopt, entropy + asymmetric)        | `modelopt`   |
 
 레시피 #8–#10은 NVIDIA ModelOpt의 ONNX-path PTQ로, `trt_builtin` INT8
 캘리브레이터의 mAP drop 문제(-7.9%p)를 **-1.6~1.9%p 수준으로 개선**합니다. #12는
 민감 레이어(stem + bbox regression head)를 FP16에 남기는 혼합 정밀도 실험.
+#42는 `use_zero_point=True` 로 asymmetric INT8 — 분포 치우친 활성(ReLU/SiLU 후)의
+dynamic range 확장.
 
 레시피 #13–#16은 ONNX Runtime의 `quantize_static` 4종 calibrator. ORT가
 정량화 전에 `quant_pre_process`로 graph folding을 강제하므로 결과 엔진이
@@ -47,23 +56,31 @@ modelopt 경로보다 얇아져 **fps는 30~70% 더 빠르고 mAP는 2.5~6%p 떨
 (best: `ort_int8_percentile`, drop +2.5%p). 속도/정확도 trade-off가 필요할 때
 modelopt 대신 고려 가능.
 
-레시피 #17–#18 (Intel Neural Compressor)은 **현 조합에서 TRT 빌드 실패** — INC 2.6 +
-onnx 1.17 + TRT 10 + YOLO26n attention block에서 다단계 비호환 (INT32 bias DQ,
-asymmetric zero_point, SmoothQuant의 attention reshape 재작성 누락). 레시피/디스패처 코드는
-그대로 두고 build 실패를 report Issues에 노출. 재활성은 INC 3.x 혹은 torch-level
-SmoothQuant 재구현 시점.
+레시피 #23/#24는 Wave 10 FastNAS pruning + INT8. FLOPs 15.7% 감소 (FX trace가
+YOLO backbone/neck을 제외) 하지만 combined pipeline 이 **engine 5 MB (baseline
+38 MB 대비 −88%)** 를 달성 — edge/embedded/VRAM 제약 시나리오용. 자세한 분석은
+`docs/plans/_shipped/2026-04-21-wave10-modelopt-fastnas-pruning.md` 참조.
+
+레시피 #40–#42 는 Wave 14 TRT tuning variants. `builder_optimization_level=5`
+(exhaustive tactic autotune, 3-5x 빌드 시간 소요) + BF16 + asymmetric INT8
+세 축. 자세한 내용은 `docs/plans/_shipped/` 아래 Wave 14 문서 참조.
 
 자세한 Wave 3 해석은 `docs/improvements/2026-04-18-trt-modelopt-audit.md` 참조.
 
-> **#7, #11, #19 parked — training 코드가 들어오기 전까지 평가 대상에서 제외**
+> **#7, #11 parked — training 코드가 들어오기 전까지 평가 대상에서 제외**
 >
-> 레시피/스키마/runner 코드는 **그대로 유지**됩니다. `make recipe-07`, `make recipe-11`,
-> `make recipe-19`로 개별 실행은 여전히 가능 (기존 결과 JSON은 `results/`에 보존).
-> `make all`에서는 자동 실행되지 않고, `make report` 순위표에서도 `--exclude`
-> 플래그로 빠집니다. #7/#11은 post-training 2:4 sparsity가 nano YOLO의 mAP를
-> 사실상 0으로 무너뜨린 것이 확인되어 sparsity-aware training 도입 시 재평가
-> (`docs/plans/_shipped/2026-04-18-phase3-int8-accuracy.md` 참조). #19는 INC QAT로 학습 루프가
-> 필요해 동일 대기열.
+> 레시피/스키마/runner 코드는 **그대로 유지**됩니다. `make recipe-07` 이나
+> `make recipe-11` 로 개별 실행은 여전히 가능 (기존 결과 JSON은 `results/` 에
+> 보존). `make all` 에서는 자동 실행되지 않고, `make report` 순위표에서도
+> `--exclude` 플래그로 빠집니다. #7/#11은 post-training 2:4 sparsity가 nano
+> YOLO의 mAP를 사실상 0으로 무너뜨린 것이 확인되어 sparsity-aware training
+> 도입 시 재평가
+> (`docs/plans/_shipped/2026-04-18-phase3-int8-accuracy.md` 참조).
+
+**Archived (2026-04-22):** #02 `torchcompile_fp16` (Windows MSVC blocker), #03
+`ort_cuda_fp16` (CUDA EP ↔ YOLO26n NMS ops 비호환), #20–#22 Brevitas
+(redundant with `modelopt_int8_entropy`). 아카이브 파일은 `recipes/_archived/`
+에 보존, 번호는 재사용하지 않음.
 
 ## Quick start (Docker 권장)
 
@@ -82,8 +99,8 @@ pip install -e ".[all]"                             # GPU + CPU 전체
 # pip install -e ".[cpu]"                           # openvino + nncf + py-cpuinfo
 # tensorrt는 NVIDIA 휠 인덱스에서 별도 설치 필요:
 #   pip install --extra-index-url https://pypi.nvidia.com tensorrt
-make all         # GPU 22 recipes → report.md
-make cpu-all     # CPU 6 recipes → report_cpu.md (Wave 6)
+make all         # GPU recipes → report.md
+make cpu-all     # CPU recipes → report_cpu.md (Wave 6)
 cat report.md
 ```
 
@@ -105,9 +122,11 @@ cat report.md
 
 `make all`이 끝나면:
 
-- `results/01_pytorch_fp32.json` … `results/11_modelopt_int8_sparsity.json` — 레시피별 측정값.
+- `results/*.json` — 레시피별 측정값 (파일명은 recipe 번호 기반).
 - `results/_env.json` — 실행 환경 스냅샷 (GPU, CUDA, 드라이버, 버전).
 - `report.md` — Windows/WSL 비교 순위표 + 시나리오별 추천.
+- `results_qr/*.json` — QR/barcode fine-tuned checkpoint 측정값. `make all`
+  의 `OMNI_WEIGHTS_OVERRIDE=./best_qr.pt` 변형 실행에서 생성.
 
 각 JSON은 `scripts/_schemas.py::Result` 스키마를 따릅니다.
 
@@ -138,12 +157,24 @@ make recipe-06      # TRT INT8 PTQ만 재실행
 python scripts/recommend.py --results-dir results --out report.md
 ```
 
-## 일부러 뺀 것 (Wave 7+ 후보)
+## 일부러 뺀 것
 
-TFLite, CoreML EP (Apple Silicon), TVM, NCNN, SNPE, MIGraphX, Knowledge
-Distillation, Early Exit, Token Merging, W4A16, FP8, AMD CPU 전용 튜닝,
-ARM NEON/SVE. Wave 6에서 추가된 것: **OpenVINO + NNCF**(#34/#35), QAT
-(`modelopt_qat`, #17), BF16(`ort_cpu_bf16`, #31, hardware-gated).
+현재 out-of-scope: TFLite, CoreML EP (Apple Silicon), TVM, SNPE,
+MIGraphX, Knowledge Distillation, Early Exit, Token Merging, W4A16, FP8,
+AMD CPU 전용 튜닝, ARM NEON/SVE.
+
+**Wave 별 시도 기록:**
+
+- Wave 6 (SHIPPED): OpenVINO + NNCF (#34/#35), QAT (`modelopt_qat`, #17),
+  BF16 (`ort_cpu_bf16`, #31, hardware-gated).
+- Wave 10 (SHIPPED): FastNAS pruning + INT8 (#23/#24/#36/#37/#38) — engine
+  size −88% for edge/embedded 시나리오.
+- Wave 14 (SHIPPED): TRT builder tuning (#40 opt_level=5, #41 bf16, #42
+  asymmetric INT8 — NEW TOP fps 770.5).
+- Wave 7–9, 12–13 ARCHIVED pre-execution: NCNN / AITemplate / INT4 / ONNX
+  autotune — blockers from YOLO26n end-to-end NMS ops or missing NVIDIA
+  feature support. 자세한 archive 사유는 `docs/improvements/` 의 spike
+  result 파일 참조.
 
 ## 레시피 YAML 스키마
 
