@@ -1,8 +1,16 @@
 # OmniOptimizer Recipe Bank — 전체 정리
 
-**Last updated**: 2026-04-22 (Wave 14 ship 이후)
+**Last updated**: 2026-04-23 (Wave 15 ship 이후)
 **Benchmark env**: YOLO26n · best_qr.pt · QR val (133 images) · RTX 3060 Laptop GPU (sm_86) + i7-11375H Tiger Lake · Windows 11 · TRT 10.16 + CUDA 12.9 + ORT 1.22
 **Measurement protocol**: `scripts/measure.py::measure_latency` (warmup 100-200 / measure 100-300 iters · CUDA events + perf_counter percentiles)
+
+> **Wave 15 (2026-04-23)** — audit-driven runtime tuning. 레시피 수/ 랭킹
+> 변동 없음; runner 레벨 knob 조정만: OpenVINO `CACHE_DIR` persistent
+> kernel cache + ORT TRT EP `trt_builder_optimization_level=5` / timing
+> cache (backward-compat 폴백 포함) + `MeasurementSpec.build_ceiling_s`
+> schema. D2 opt_level=5 opt-in to #09/#12/#42 는 측정 후 ROLLBACK
+> (INT8 modelopt 은 opt_level=3 에서 이미 ceiling 근처). 자세한 내용은
+> [`docs/improvements/2026-04-23-wave15-results.md`](improvements/2026-04-23-wave15-results.md).
 
 ## GPU 레시피 (23 active + 5 archived)
 
@@ -131,5 +139,6 @@
 - 최근 shipped wave: [`docs/plans/_shipped/2026-04-21-wave10-modelopt-fastnas-pruning.md`](plans/_shipped/2026-04-21-wave10-modelopt-fastnas-pruning.md)
 - Wave 11 cleanup: [`docs/plans/2026-04-22-wave11-recipe-debug-cleanup.md`](plans/2026-04-22-wave11-recipe-debug-cleanup.md)
 - Wave 14 TRT tuning: [`docs/plans/2026-04-22-wave14-trt-optimization.md`](plans/2026-04-22-wave14-trt-optimization.md)
+- Wave 15 audit-driven tuning: [`docs/plans/2026-04-23-wave15-audit-driven-tuning.md`](plans/2026-04-23-wave15-audit-driven-tuning.md) · [`docs/improvements/2026-04-23-wave15-results.md`](improvements/2026-04-23-wave15-results.md)
 - Recipe audit: [`docs/improvements/2026-04-22-recipe-bank-audit.md`](improvements/2026-04-22-recipe-bank-audit.md)
 - Live reports: [`report_qr.md`](../report_qr.md), [`report_cpu_qr.md`](../report_cpu_qr.md)
