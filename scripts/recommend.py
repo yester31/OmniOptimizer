@@ -102,6 +102,10 @@ def rank(
                 "meets": meets,
                 "reasons": reasons,
                 "notes": r.notes,
+                # Wave 16 D1: surfaced in format_report's ceiling-breach section.
+                # None on historical JSONs; True/False on runs that plumbed it through.
+                "build_time_s": _safe(r.build_time_s),
+                "build_ceiling_breached": r.build_ceiling_breached,
             }
         )
 
@@ -166,6 +170,23 @@ def format_report(rows: list[dict], baseline: Optional[Result]) -> str:
             "_No recipe satisfied all constraints._ Loosen `max_map_drop_pct` or `min_fps_bs1` in "
             "the recipe YAMLs, or investigate the failures listed below."
         )
+
+    # Wave 16 D1: surface build-time ceiling breaches (stderr warning is easy
+    # to miss in batch runs; this block keeps a paper trail in the report).
+    breaches = [r for r in rows if r.get("build_ceiling_breached")]
+    if breaches:
+        lines.append("")
+        lines.append("## Build-Time Ceiling Breaches")
+        lines.append(
+            "_These recipes exceeded `MeasurementSpec.build_ceiling_s` (600s default). "
+            "Not a failure — engines are still valid — but batch-mode ship decisions "
+            "should factor the build cost._"
+        )
+        lines.append("")
+        for r in breaches:
+            bt = r.get("build_time_s")
+            bt_str = fmt(bt, "{:.0f}s") if bt is not None else "unknown"
+            lines.append(f"- `{r['recipe']}`: build_time_s={bt_str}")
 
     # Failure / note dump
     issues = [r for r in rows if not r["meets"] or r["notes"]]

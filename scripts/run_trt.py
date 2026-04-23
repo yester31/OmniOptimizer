@@ -863,6 +863,11 @@ def run(recipe_path: str, out_path: str) -> int:
     cold_start_ms: Optional[float] = None
     bs1_engine: Optional[Path] = None  # referenced later for mAP eval
     build_time_s_bs1: Optional[float] = None  # Wave 14 A1: bs1 build time
+    # Wave 16 D1: True once any bs build exceeded the ceiling, False once any
+    # build succeeded under the ceiling, None if every build failed. Writes
+    # True are sticky — a later under-ceiling build cannot mask an earlier
+    # breach.
+    build_ceiling_breached: Optional[bool] = None
 
     source = recipe.technique.source
     source_suffix = _SOURCE_TAG.get(source, f"_{source}")
@@ -897,6 +902,18 @@ def run(recipe_path: str, out_path: str) -> int:
         if bs == 1:
             bs1_engine = built
             build_time_s_bs1 = build_time_s
+
+        # Wave 16 D1: track ceiling breach for round-trip into Result JSON.
+        # Mirror _build_engine's 600s default when recipe doesn't override.
+        _ceiling = (
+            recipe.measurement.build_ceiling_s
+            if recipe.measurement.build_ceiling_s is not None
+            else 600
+        )
+        if build_time_s > _ceiling:
+            build_ceiling_breached = True
+        elif build_ceiling_breached is None:
+            build_ceiling_breached = False
 
         try:
             def _load(e=built, b=bs):
@@ -996,6 +1013,7 @@ def run(recipe_path: str, out_path: str) -> int:
         cold_start_ms=cold_start_ms,
         accuracy=acc,
         build_time_s=build_time_s_bs1,
+        build_ceiling_breached=build_ceiling_breached,
         meets_constraints=meets,
         notes="; ".join(note_parts) or None,
     )
