@@ -211,6 +211,12 @@ class Result(BaseModel):
     # recipes and on historical JSONs. Populated when builder_optimization_level
     # is set to track the build-time cost of aggressive tactic autotune.
     build_time_s: Optional[float] = None
+    # Wave 16 D1: True if build_time_s exceeded MeasurementSpec.build_ceiling_s
+    # (or 600s default) on at least one bs in this recipe. None when no build
+    # completed (e.g. all batch sizes failed), or on historical JSONs written
+    # before the ceiling signal was wired through. recommend.py surfaces
+    # recipes with this flag so ceiling breaches don't get lost in stderr.
+    build_ceiling_breached: Optional[bool] = None
 
 
 def load_recipe(path: str) -> Recipe:
