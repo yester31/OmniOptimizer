@@ -138,10 +138,12 @@ def _make_session(onnx_path: Path, execution_provider: str, dtype: str = "fp32")
     sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     try:
         session = ort.InferenceSession(str(onnx_path), sess_options=sess_opts, providers=providers)
-    except Exception as e:
+    except (ValueError, RuntimeError) as e:
         # Wave 15 D1.2 backward-compat: strip new TRT EP keys if this ORT
         # build rejects them and retry once. Only applies when we actually
         # sent the Wave 15 additions; other failures propagate.
+        # Narrowed from bare Exception so OSError / MemoryError / auth errors
+        # surface rather than being misrouted into the retry path.
         wave15_keys = (
             "trt_builder_optimization_level",
             "trt_timing_cache_enable",

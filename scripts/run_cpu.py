@@ -457,7 +457,10 @@ def _get_ov_core():
             cache_dir = Path("results_cpu/_ov_cache")
             cache_dir.mkdir(parents=True, exist_ok=True)
             _OV_CORE.set_property({"CACHE_DIR": str(cache_dir)})
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
+            # Narrowed from bare Exception so MemoryError / KeyboardInterrupt
+            # propagate. OSError covers mkdir permission/IO; ValueError and
+            # RuntimeError cover OV's set_property rejection modes.
             print(f"[warn] OV CACHE_DIR setup failed ({e}); running without cache",
                   file=sys.stderr)
     return _OV_CORE
